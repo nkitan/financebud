@@ -57,7 +57,7 @@ echo "   - No API key required"
 echo "   - Good privacy"
 echo "   - Install: curl -fsSL https://ollama.ai/install.sh | sh"
 echo "   - Start: ollama serve"
-echo "   - Download model: ollama pull gemma-3-12b-it-Q4_K_M:latest"
+echo "   - Download model: ollama pull llama3.1:latest"
 echo ""
 echo "2. 🤖 OpenAI GPT"
 echo "   - Powerful and fast"
@@ -104,12 +104,12 @@ if command_exists ollama; then
         echo "📥 Available models:"
         ollama list
         
-        # Check if gemma-3-12b-it-Q4_K_M:latest is available
-        if ollama list | grep -q "gemma-3-12b-it-Q4_K_M:latest"; then
-            echo "✅ gemma-3-12b-it-Q4_K_M:latest model is ready!"
+        # Check if llama3.1:latest is available
+        if ollama list | grep -q "llama3.1:latest"; then
+            echo "✅ llama3.1:latest model is ready!"
         else
-            echo "📥 Downloading gemma-3-12b-it-Q4_K_M:latest model (this may take a while)..."
-            ollama pull gemma-3-12b-it-Q4_K_M:latest
+            echo "📥 Downloading llama3.1:latest model (this may take a while)..."
+            ollama pull llama3.1:latest
         fi
     else
         echo "⚠️  Ollama is installed but not running. Start it with: ollama serve"

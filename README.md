@@ -204,7 +204,7 @@ The system provides 6 FastMCP tools for financial analysis:
 - **Best for**: Local execution, privacy, no API costs
 - **Setup**: `curl -fsSL https://ollama.ai/install.sh | sh`
 - **Start**: `ollama serve`
-- **Model**: `ollama pull llama3.1` or `ollama pull gemma2`
+- **Model**: `ollama pull llama3.1` or `ollama pull gemma3`
 - **Config**: Set `LLM_PROVIDER=ollama` in `.env`
 
 ### 🤖 OpenAI
