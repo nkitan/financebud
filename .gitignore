@@ -1,0 +1,62 @@
+# .gitignore
+# This file specifies intentionally untracked files to ignore in a Git repository.
+
+venv/
+.venv/
+# Python virtual environment
+__pycache__/
+# Python cache files
+*.pyc
+# Compiled Python files
+*.pyo
+# Compiled Python files
+*.pyd
+# Compiled Python files
+*.db
+# Database files
+*.sqlite3
+# SQLite database files
+*.log
+# Log files
+*.env
+# Environment variable files
+*.DS_Store
+# macOS Finder metadata files
+*.vscode/
+# Visual Studio Code settings
+.idea/
+# JetBrains IDE settings
+*.swp
+# Vim swap files
+*.swo
+# Vim swap files
+*.bak
+# Backup files
+*.tmp
+# Temporary files
+*.temp
+# Temporary files
+*.orig
+# Original files
+*.coverage
+# Coverage files
+*.egg-info/
+# Python package metadata
+*.egg
+# Python egg files
+*.whl
+# Python wheel files
+*.tar.gz
+# Python source distribution files
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+# Jupyter Notebook checkpoints
+*.ipynb
+# Jupyter Notebook files
+*.ipynb_checkpoints
+# Jupyter Notebook checkpoints
+
+# PyCharm project files
+.idea/
+Bank-Statements/

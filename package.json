@@ -1,0 +1,15 @@
+{
+  "name": "financebud-ui",
+  "version": "1.0.0",
+  "description": "Financial Data Analysis UI with LangGraph Agent Support",
+  "scripts": {
+    "dev": "python -m uvicorn backend.main:app --reload --host 0.0.0.0 --port 8000",
+    "start": "python -m uvicorn backend.main:app --host 0.0.0.0 --port 8000",
+    "test": "pytest tests/",
+    "format": "black . && isort .",
+    "install": "pip install -r requirements.txt"
+  },
+  "keywords": ["finance", "banking", "mcp", "langgraph", "ai", "agents"],
+  "author": "FinanceBud Team",
+  "license": "MIT"
+}

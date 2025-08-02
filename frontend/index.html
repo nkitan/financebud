@@ -1,0 +1,516 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FinanceBud - AI Financial Analysis</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js" defer></script>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <style>
+        .chat-message {
+            animation: fadeIn 0.3s ease-in;
+        }
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        .typing-indicator {
+            animation: pulse 2s infinite;
+        }
+        .loading-dots::after {
+            content: '';
+            animation: dots 1.5s infinite;
+        }
+        @keyframes dots {
+            0%, 20% { content: '.'; }
+            40% { content: '..'; }
+            60%, 100% { content: '...'; }
+        }
+    </style>
+</head>
+<body class="bg-gray-50" x-data="financeBudApp()">
+    <!-- Header -->
+    <header class="bg-white shadow-sm border-b">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+            <div class="flex justify-between items-center py-4">
+                <div class="flex items-center space-x-3">
+                    <div class="bg-blue-600 text-white p-2 rounded-lg">
+                        <i class="fas fa-chart-line text-xl"></i>
+                    </div>
+                    <div>
+                        <h1 class="text-2xl font-bold text-gray-900">FinanceBud</h1>
+                        <p class="text-sm text-gray-600">AI-Powered Financial Analysis</p>
+                    </div>
+                </div>
+                <div class="flex items-center space-x-4">
+                    <div class="flex items-center space-x-2">
+                        <div class="w-2 h-2 rounded-full" :class="connectionStatus === 'connected' ? 'bg-green-500' : 'bg-red-500'"></div>
+                        <span class="text-sm text-gray-600" x-text="connectionStatus === 'connected' ? 'Connected' : 'Disconnected'"></span>
+                    </div>
+                    <button @click="showSettings = !showSettings" class="p-2 text-gray-600 hover:text-gray-900 rounded-lg hover:bg-gray-100">
+                        <i class="fas fa-cog"></i>
+                    </button>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
+        <div class="grid grid-cols-1 lg:grid-cols-4 gap-6">
+            <!-- Sidebar -->
+            <div class="lg:col-span-1">
+                <!-- Quick Actions -->
+                <div class="bg-white rounded-lg shadow p-6 mb-6">
+                    <h3 class="text-lg font-semibold text-gray-900 mb-4">Quick Actions</h3>
+                    <div class="space-y-2">
+                        <button @click="sendQuickQuery('Show me my account summary')" 
+                                class="w-full text-left p-3 rounded-lg hover:bg-gray-50 transition-colors flex items-center space-x-2">
+                            <i class="fas fa-wallet text-blue-600"></i>
+                            <span>Account Summary</span>
+                        </button>
+                        <button @click="sendQuickQuery('Show me my recent transactions')" 
+                                class="w-full text-left p-3 rounded-lg hover:bg-gray-50 transition-colors flex items-center space-x-2">
+                            <i class="fas fa-list text-green-600"></i>
+                            <span>Recent Transactions</span>
+                        </button>
+                        <button @click="sendQuickQuery('Analyze my spending patterns')" 
+                                class="w-full text-left p-3 rounded-lg hover:bg-gray-50 transition-colors flex items-center space-x-2">
+                            <i class="fas fa-chart-pie text-purple-600"></i>
+                            <span>Spending Analysis</span>
+                        </button>
+                        <button @click="sendQuickQuery('Find my recurring payments')" 
+                                class="w-full text-left p-3 rounded-lg hover:bg-gray-50 transition-colors flex items-center space-x-2">
+                            <i class="fas fa-repeat text-orange-600"></i>
+                            <span>Recurring Payments</span>
+                        </button>
+                        <button @click="sendQuickQuery('Show UPI transaction analysis')" 
+                                class="w-full text-left p-3 rounded-lg hover:bg-gray-50 transition-colors flex items-center space-x-2">
+                            <i class="fas fa-mobile-alt text-indigo-600"></i>
+                            <span>UPI Analysis</span>
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Financial Overview -->
+                <div class="bg-white rounded-lg shadow p-6" x-show="financialSummary">
+                    <h3 class="text-lg font-semibold text-gray-900 mb-4">Financial Overview</h3>
+                    <template x-if="financialSummary">
+                        <div class="space-y-3">
+                            <div class="flex justify-between">
+                                <span class="text-gray-600">Current Balance</span>
+                                <span class="font-semibold text-green-600" x-text="financialSummary.current_balance_inr"></span>
+                            </div>
+                            <div class="flex justify-between">
+                                <span class="text-gray-600">Total Transactions</span>
+                                <span class="font-semibold" x-text="financialSummary.total_transactions?.toLocaleString()"></span>
+                            </div>
+                            <div class="border-t pt-2">
+                                <div class="text-xs text-gray-500">
+                                    <span x-text="financialSummary.date_range?.earliest"></span> - 
+                                    <span x-text="financialSummary.date_range?.latest"></span>
+                                </div>
+                            </div>
+                        </div>
+                    </template>
+                </div>
+            </div>
+
+            <!-- Main Chat Area -->
+            <div class="lg:col-span-3">
+                <div class="bg-white rounded-lg shadow h-[600px] flex flex-col">
+                    <!-- Chat Header -->
+                    <div class="p-4 border-b">
+                        <div class="flex items-center justify-between">
+                            <h2 class="text-lg font-semibold text-gray-900">Financial Assistant</h2>
+                            <div class="flex items-center space-x-2">
+                                <button @click="clearChat()" class="text-gray-600 hover:text-gray-900 p-1">
+                                    <i class="fas fa-trash text-sm"></i>
+                                </button>
+                                <button @click="exportChat()" class="text-gray-600 hover:text-gray-900 p-1">
+                                    <i class="fas fa-download text-sm"></i>
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Chat Messages -->
+                    <div class="flex-1 overflow-y-auto p-4 space-y-4" id="chatContainer">
+                        <!-- Welcome Message -->
+                        <div class="chat-message" x-show="messages.length === 0">
+                            <div class="flex items-start space-x-3">
+                                <div class="bg-blue-600 text-white p-2 rounded-full">
+                                    <i class="fas fa-robot text-sm"></i>
+                                </div>
+                                <div class="bg-blue-50 rounded-lg p-4 max-w-md">
+                                    <p class="text-gray-800">
+                                        👋 Hello! I'm your AI financial assistant. I can help you:
+                                    </p>
+                                    <ul class="mt-2 text-sm text-gray-700 space-y-1">
+                                        <li>• Analyze your spending patterns</li>
+                                        <li>• Find recurring payments</li>
+                                        <li>• Search transactions</li>
+                                        <li>• Generate financial reports</li>
+                                    </ul>
+                                    <p class="mt-2 text-sm text-gray-600">
+                                        Try asking: "Show me my account summary" or use the quick actions on the left!
+                                    </p>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Chat Messages -->
+                        <template x-for="message in messages" :key="message.id">
+                            <div class="chat-message">
+                                <div class="flex items-start space-x-3" :class="message.type === 'user' ? 'flex-row-reverse space-x-reverse' : ''">
+                                    <div class="p-2 rounded-full" :class="message.type === 'user' ? 'bg-gray-600 text-white' : 'bg-blue-600 text-white'">
+                                        <i :class="message.type === 'user' ? 'fas fa-user text-sm' : 'fas fa-robot text-sm'"></i>
+                                    </div>
+                                    <div class="max-w-md" :class="message.type === 'user' ? 'text-right' : ''">
+                                        <div class="rounded-lg p-4" :class="message.type === 'user' ? 'bg-gray-100' : 'bg-blue-50'">
+                                            <div x-html="formatMessage(message.content)"></div>
+                                            <template x-if="message.metadata && message.metadata.tools_used && message.metadata.tools_used.length > 0">
+                                                <div class="mt-2 text-xs text-gray-500">
+                                                    🔧 Used tools: <span x-text="message.metadata.tools_used.join(', ')"></span>
+                                                </div>
+                                            </template>
+                                        </div>
+                                        <div class="text-xs text-gray-500 mt-1" x-text="formatTime(message.timestamp)"></div>
+                                    </div>
+                                </div>
+                            </div>
+                        </template>
+
+                        <!-- Typing Indicator -->
+                        <div class="chat-message typing-indicator" x-show="isTyping">
+                            <div class="flex items-start space-x-3">
+                                <div class="bg-blue-600 text-white p-2 rounded-full">
+                                    <i class="fas fa-robot text-sm"></i>
+                                </div>
+                                <div class="bg-blue-50 rounded-lg p-4">
+                                    <span class="text-gray-600">Analyzing your request<span class="loading-dots"></span></span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Chat Input -->
+                    <div class="p-4 border-t">
+                        <form @submit.prevent="sendMessage()" class="flex space-x-2">
+                            <input 
+                                x-model="currentMessage" 
+                                type="text" 
+                                placeholder="Ask me about your finances..."
+                                class="flex-1 border border-gray-300 rounded-lg px-4 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                                :disabled="isTyping"
+                            >
+                            <button 
+                                type="submit" 
+                                :disabled="isTyping || !currentMessage.trim()"
+                                class="bg-blue-600 text-white px-6 py-2 rounded-lg hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                            >
+                                <i class="fas fa-paper-plane"></i>
+                            </button>
+                        </form>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Settings Modal -->
+    <div x-show="showSettings" class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50" @click.self="showSettings = false">
+        <div class="bg-white rounded-lg shadow-xl max-w-md w-full m-4">
+            <div class="p-6">
+                <div class="flex items-center justify-between mb-4">
+                    <h3 class="text-lg font-semibold text-gray-900">Settings</h3>
+                    <button @click="showSettings = false" class="text-gray-600 hover:text-gray-900">
+                        <i class="fas fa-times"></i>
+                    </button>
+                </div>
+                
+                <div class="space-y-4">
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-2">API Base URL</label>
+                        <input 
+                            x-model="settings.apiBaseUrl" 
+                            type="text" 
+                            class="w-full border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                            placeholder="http://localhost:8000"
+                        >
+                    </div>
+                    
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-2">Session ID</label>
+                        <input 
+                            x-model="settings.sessionId" 
+                            type="text" 
+                            class="w-full border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                            placeholder="Your session ID"
+                        >
+                    </div>
+                    
+                    <div class="flex items-center">
+                        <input 
+                            x-model="settings.useWebSocket" 
+                            type="checkbox" 
+                            id="websocket" 
+                            class="mr-2"
+                        >
+                        <label for="websocket" class="text-sm text-gray-700">Use WebSocket connection</label>
+                    </div>
+                </div>
+                
+                <div class="mt-6 flex justify-end space-x-2">
+                    <button @click="showSettings = false" class="px-4 py-2 text-gray-600 hover:text-gray-900">
+                        Cancel
+                    </button>
+                    <button @click="saveSettings()" class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700">
+                        Save
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        function financeBudApp() {
+            return {
+                // State
+                messages: [],
+                currentMessage: '',
+                isTyping: false,
+                connectionStatus: 'disconnected',
+                showSettings: false,
+                financialSummary: null,
+                websocket: null,
+                
+                // Settings
+                settings: {
+                    apiBaseUrl: 'http://localhost:8000',
+                    sessionId: 'default-session',
+                    useWebSocket: true
+                },
+
+                // Initialize
+                init() {
+                    this.loadSettings();
+                    this.checkConnection();
+                    this.loadFinancialSummary();
+                    
+                    if (this.settings.useWebSocket) {
+                        this.connectWebSocket();
+                    }
+                },
+
+                // Settings Management
+                loadSettings() {
+                    const saved = localStorage.getItem('financebud-settings');
+                    if (saved) {
+                        this.settings = { ...this.settings, ...JSON.parse(saved) };
+                    }
+                },
+
+                saveSettings() {
+                    localStorage.setItem('financebud-settings', JSON.stringify(this.settings));
+                    this.showSettings = false;
+                    
+                    // Reconnect if needed
+                    if (this.settings.useWebSocket) {
+                        this.connectWebSocket();
+                    } else if (this.websocket) {
+                        this.websocket.close();
+                        this.websocket = null;
+                    }
+                },
+
+                // Connection Management
+                async checkConnection() {
+                    try {
+                        const response = await fetch(`${this.settings.apiBaseUrl}/health`);
+                        if (response.ok) {
+                            this.connectionStatus = 'connected';
+                        } else {
+                            this.connectionStatus = 'disconnected';
+                        }
+                    } catch (error) {
+                        this.connectionStatus = 'disconnected';
+                        console.error('Connection check failed:', error);
+                    }
+                },
+
+                connectWebSocket() {
+                    if (this.websocket) {
+                        this.websocket.close();
+                    }
+
+                    try {
+                        const wsUrl = this.settings.apiBaseUrl.replace('http', 'ws') + `/ws/${this.settings.sessionId}`;
+                        this.websocket = new WebSocket(wsUrl);
+
+                        this.websocket.onopen = () => {
+                            console.log('WebSocket connected');
+                            this.connectionStatus = 'connected';
+                        };
+
+                        this.websocket.onmessage = (event) => {
+                            const data = JSON.parse(event.data);
+                            this.handleWebSocketMessage(data);
+                        };
+
+                        this.websocket.onclose = () => {
+                            console.log('WebSocket disconnected');
+                            this.connectionStatus = 'disconnected';
+                        };
+
+                        this.websocket.onerror = (error) => {
+                            console.error('WebSocket error:', error);
+                            this.connectionStatus = 'disconnected';
+                        };
+                    } catch (error) {
+                        console.error('Failed to connect WebSocket:', error);
+                        this.connectionStatus = 'disconnected';
+                    }
+                },
+
+                handleWebSocketMessage(data) {
+                    if (data.type === 'response') {
+                        this.isTyping = false;
+                        this.addMessage('assistant', data.data.response, {
+                            tools_used: data.data.tools_used,
+                            execution_time: data.data.execution_time
+                        });
+                    } else if (data.type === 'error') {
+                        this.isTyping = false;
+                        this.addMessage('assistant', `Error: ${data.error}`);
+                    }
+                },
+
+                // Message Management
+                addMessage(type, content, metadata = {}) {
+                    const message = {
+                        id: Date.now() + Math.random(),
+                        type: type,
+                        content: content,
+                        timestamp: new Date(),
+                        metadata: metadata
+                    };
+                    this.messages.push(message);
+                    this.$nextTick(() => this.scrollToBottom());
+                },
+
+                async sendMessage() {
+                    if (!this.currentMessage.trim() || this.isTyping) return;
+
+                    const userMessage = this.currentMessage;
+                    this.addMessage('user', userMessage);
+                    this.currentMessage = '';
+                    this.isTyping = true;
+
+                    try {
+                        if (this.settings.useWebSocket && this.websocket && this.websocket.readyState === WebSocket.OPEN) {
+                            // Send via WebSocket
+                            this.websocket.send(JSON.stringify({
+                                content: userMessage,
+                                context: {}
+                            }));
+                        } else {
+                            // Send via HTTP
+                            const response = await fetch(`${this.settings.apiBaseUrl}/api/chat`, {
+                                method: 'POST',
+                                headers: {
+                                    'Content-Type': 'application/json'
+                                },
+                                body: JSON.stringify({
+                                    content: userMessage,
+                                    session_id: this.settings.sessionId,
+                                    context: {}
+                                })
+                            });
+
+                            if (!response.ok) {
+                                throw new Error(`HTTP error! status: ${response.status}`);
+                            }
+
+                            const data = await response.json();
+                            this.isTyping = false;
+                            this.addMessage('assistant', data.response, {
+                                tools_used: data.tools_used,
+                                execution_time: data.execution_time
+                            });
+                        }
+                    } catch (error) {
+                        this.isTyping = false;
+                        this.addMessage('assistant', `Sorry, I encountered an error: ${error.message}`);
+                        console.error('Error sending message:', error);
+                    }
+                },
+
+                sendQuickQuery(query) {
+                    this.currentMessage = query;
+                    this.sendMessage();
+                },
+
+                // UI Helpers
+                formatMessage(content) {
+                    // Simple formatting for better display
+                    return content
+                        .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+                        .replace(/\*(.*?)\*/g, '<em>$1</em>')
+                        .replace(/\n/g, '<br>')
+                        .replace(/₹([\d,]+\.?\d*)/g, '<span class="font-semibold text-green-600">₹$1</span>');
+                },
+
+                formatTime(timestamp) {
+                    return new Date(timestamp).toLocaleTimeString([], { 
+                        hour: '2-digit', 
+                        minute: '2-digit' 
+                    });
+                },
+
+                scrollToBottom() {
+                    const container = document.getElementById('chatContainer');
+                    if (container) {
+                        container.scrollTop = container.scrollHeight;
+                    }
+                },
+
+                clearChat() {
+                    this.messages = [];
+                },
+
+                exportChat() {
+                    const chatData = {
+                        timestamp: new Date().toISOString(),
+                        messages: this.messages
+                    };
+                    
+                    const blob = new Blob([JSON.stringify(chatData, null, 2)], { 
+                        type: 'application/json' 
+                    });
+                    
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = `financebud-chat-${new Date().toISOString().split('T')[0]}.json`;
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                    URL.revokeObjectURL(url);
+                },
+
+                async loadFinancialSummary() {
+                    try {
+                        const response = await fetch(`${this.settings.apiBaseUrl}/api/financial/summary`);
+                        if (response.ok) {
+                            this.financialSummary = await response.json();
+                        }
+                    } catch (error) {
+                        console.error('Failed to load financial summary:', error);
+                    }
+                }
+            }
+        }
+    </script>
+</body>
+</html>
