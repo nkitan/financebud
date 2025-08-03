@@ -81,15 +81,13 @@ async def get_account_summary_tool(tool_input: str) -> str:
         client = FastMCPClient("mcp_server.py")
         async with client:
             result = await client.call_tool("get_account_summary", {})
-            # Extract the actual text content from FastMCP result
-            if hasattr(result, 'content') and result.content and len(result.content) > 0:
-                content_item = result.content[0]
-                text_content = getattr(content_item, 'text', None)
-                if text_content is not None:
-                    return str(text_content)
-            if hasattr(result, 'data'):
-                return str(result.data)
-            return json.dumps(result.__dict__ if hasattr(result, '__dict__') else str(result), indent=2)
+            # Extract text content from FastMCP CallToolResult
+            if hasattr(result, 'content') and result.content:
+                for content_item in result.content:
+                    # Check if it's a text content item
+                    if hasattr(content_item, 'type') and content_item.type == 'text':
+                        return getattr(content_item, 'text', str(content_item))
+            return str(result)
     except Exception as e:
         logger.error(f"Error getting account summary: {e}")
         return f"Error getting account summary: {str(e)}"
@@ -101,15 +99,12 @@ async def search_transactions_tool(tool_input: str) -> str:
         params = {"description_pattern": tool_input.strip()}
         async with client:
             result = await client.call_tool("search_transactions", params)
-            # Extract the actual text content from FastMCP result
-            if hasattr(result, 'content') and result.content and len(result.content) > 0:
-                content_item = result.content[0]
-                text_content = getattr(content_item, 'text', None)
-                if text_content is not None:
-                    return str(text_content)
-            if hasattr(result, 'data'):
-                return str(result.data)
-            return json.dumps(result.__dict__ if hasattr(result, '__dict__') else str(result), indent=2)
+            # Extract text content from FastMCP CallToolResult
+            if hasattr(result, 'content') and result.content:
+                for content_item in result.content:
+                    if hasattr(content_item, 'type') and content_item.type == 'text':
+                        return getattr(content_item, 'text', str(content_item))
+            return str(result)
     except Exception as e:
         logger.error(f"Error searching transactions: {e}")
         return f"Error searching transactions: {str(e)}"
@@ -138,15 +133,12 @@ async def get_transactions_by_date_range_tool(tool_input: str) -> str:
             
         async with client:
             result = await client.call_tool("get_transactions_by_date_range", params)
-            # Extract the actual text content from FastMCP result
-            if hasattr(result, 'content') and result.content and len(result.content) > 0:
-                content_item = result.content[0]
-                text_content = getattr(content_item, 'text', None)
-                if text_content is not None:
-                    return str(text_content)
-            if hasattr(result, 'data'):
-                return str(result.data)
-            return json.dumps(result.__dict__ if hasattr(result, '__dict__') else str(result), indent=2)
+            # Extract text content from FastMCP CallToolResult
+            if hasattr(result, 'content') and result.content:
+                for content_item in result.content:
+                    if hasattr(content_item, 'type') and content_item.type == 'text':
+                        return getattr(content_item, 'text', str(content_item))
+            return str(result)
     except Exception as e:
         logger.error(f"Error getting transactions by date range: {e}")
         return f"Error getting transactions by date range: {str(e)}"
@@ -176,7 +168,12 @@ async def get_monthly_summary_tool(tool_input: str) -> str:
             
         async with client:
             result = await client.call_tool("get_monthly_summary", params)
-            return str(result.content) if hasattr(result, 'content') else json.dumps(result, indent=2)
+            # Extract text content from FastMCP CallToolResult
+            if hasattr(result, 'content') and result.content:
+                for content_item in result.content:
+                    if hasattr(content_item, 'type') and content_item.type == 'text':
+                        return getattr(content_item, 'text', str(content_item))
+            return str(result)
     except Exception as e:
         return f"Error getting monthly summary: {str(e)}"
 
@@ -186,17 +183,22 @@ async def analyze_spending_trends_tool(tool_input: str) -> str:
         client = FastMCPClient("mcp_server.py")
         
         # Parse months parameter
-        params = {"months": 6}  # Default
+        params = {"months_back": 6}  # Default - parameter name should match MCP server
         if "months:" in tool_input:
             try:
                 months_str = tool_input.split("months:")[1].split()[0]
-                params["months"] = int(months_str)
+                params["months_back"] = int(months_str)
             except (IndexError, ValueError):
                 pass
                 
         async with client:
             result = await client.call_tool("analyze_spending_trends", params)
-            return str(result.content) if hasattr(result, 'content') else json.dumps(result, indent=2)
+            # Extract text content from FastMCP CallToolResult
+            if hasattr(result, 'content') and result.content:
+                for content_item in result.content:
+                    if hasattr(content_item, 'type') and content_item.type == 'text':
+                        return getattr(content_item, 'text', str(content_item))
+            return str(result)
     except Exception as e:
         return f"Error analyzing spending trends: {str(e)}"
 
@@ -206,7 +208,12 @@ async def get_upi_transaction_analysis_tool(tool_input: str) -> str:
         client = FastMCPClient("mcp_server.py")
         async with client:
             result = await client.call_tool("get_upi_transaction_analysis", {})
-            return str(result.content) if hasattr(result, 'content') else json.dumps(result, indent=2)
+            # Extract text content from FastMCP CallToolResult
+            if hasattr(result, 'content') and result.content:
+                for content_item in result.content:
+                    if hasattr(content_item, 'type') and content_item.type == 'text':
+                        return getattr(content_item, 'text', str(content_item))
+            return str(result)
     except Exception as e:
         return f"Error analyzing UPI transactions: {str(e)}"
 
