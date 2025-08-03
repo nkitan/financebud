@@ -322,6 +322,9 @@
                         this.websocket.close();
                         this.websocket = null;
                     }
+                    
+                    // Refresh financial summary with new settings
+                    this.loadFinancialSummary();
                 },
 
                 // Connection Management
@@ -501,27 +504,15 @@
 
                 async loadFinancialSummary() {
                     try {
-                        // Instead of calling a specific API endpoint, use the chat interface
-                        // to get the financial summary through the agent's tools
-                        const response = await fetch(`${this.settings.apiBaseUrl}/api/chat`, {
-                            method: 'POST',
-                            headers: {
-                                'Content-Type': 'application/json'
-                            },
-                            body: JSON.stringify({
-                                content: "Show me my account summary",
-                                session_id: "sidebar-summary",
-                                context: {}
-                            })
-                        });
+                        const response = await fetch(`${this.settings.apiBaseUrl}/api/financial-summary`);
                         
                         if (response.ok) {
                             const data = await response.json();
-                            // Parse the response to extract financial data
-                            const summaryText = data.response;
-                            
-                            // Basic parsing to extract structured data
-                            const summary = {
+                            this.financialSummary = data;
+                        } else {
+                            console.error('Failed to load financial summary:', response.status);
+                            // Fallback to default values
+                            this.financialSummary = {
                                 current_balance_inr: "₹0",
                                 total_transactions: 0,
                                 date_range: {
@@ -529,31 +520,10 @@
                                     latest: "N/A"
                                 }
                             };
-                            
-                            // Extract balance
-                            const balanceMatch = summaryText.match(/₹([\d,]+\.?\d*)/);
-                            if (balanceMatch) {
-                                summary.current_balance_inr = `₹${balanceMatch[1]}`;
-                            }
-                            
-                            // Extract transaction count
-                            const transactionMatch = summaryText.match(/(\d+)\s+transactions?/i);
-                            if (transactionMatch) {
-                                summary.total_transactions = parseInt(transactionMatch[1].replace(',', ''));
-                            }
-                            
-                            // Extract date range if present
-                            const dateMatch = summaryText.match(/(\d{4}-\d{2}-\d{2}).*?(\d{4}-\d{2}-\d{2})/);
-                            if (dateMatch) {
-                                summary.date_range.earliest = dateMatch[1];
-                                summary.date_range.latest = dateMatch[2];
-                            }
-                            
-                            this.financialSummary = summary;
                         }
                     } catch (error) {
                         console.error('Failed to load financial summary:', error);
-                        // Fallback to basic summary
+                        // Fallback to default values
                         this.financialSummary = {
                             current_balance_inr: "₹0",
                             total_transactions: 0,

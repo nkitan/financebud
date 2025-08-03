@@ -20,6 +20,7 @@ import uuid
 from datetime import datetime
 import uvicorn
 import os
+import sqlite3
 from contextlib import asynccontextmanager
 
 # Import new generic agent instead of LM Studio specific one
@@ -64,6 +65,12 @@ class ToolCall(BaseModel):
     tool_name: str
     arguments: Dict[str, Any] = Field(default_factory=dict)
 
+class FinancialSummary(BaseModel):
+    current_balance_inr: str
+    total_transactions: int
+    date_range: Dict[str, str]
+    last_updated: str
+
 class ConnectionManager:
     """Manages WebSocket connections for real-time communication."""
     
@@ -96,6 +103,55 @@ class ConnectionManager:
                 logger.error(f"Error broadcasting message: {e}")
 
 connection_manager = ConnectionManager()
+
+def get_financial_summary_from_db() -> FinancialSummary:
+    """Get financial summary directly from the database."""
+    try:
+        db_path = config.database.path
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        
+        # Get summary statistics with current balance from the latest transaction
+        cursor.execute("""
+            SELECT 
+                COUNT(*) as total_transactions,
+                (SELECT balance FROM transactions 
+                 ORDER BY transaction_date DESC, transaction_id DESC 
+                 LIMIT 1) as current_balance,
+                MIN(transaction_date) as earliest_date,
+                MAX(transaction_date) as latest_date
+            FROM transactions
+        """)
+        
+        result = cursor.fetchone()
+        conn.close()
+        
+        if result:
+            total_transactions, current_balance, earliest_date, latest_date = result
+            return FinancialSummary(
+                current_balance_inr=f"₹{current_balance:,.2f}" if current_balance else "₹0",
+                total_transactions=int(total_transactions) if total_transactions else 0,
+                date_range={
+                    "earliest": earliest_date or "N/A",
+                    "latest": latest_date or "N/A"
+                },
+                last_updated=datetime.now().isoformat()
+            )
+        else:
+            return FinancialSummary(
+                current_balance_inr="₹0",
+                total_transactions=0,
+                date_range={"earliest": "N/A", "latest": "N/A"},
+                last_updated=datetime.now().isoformat()
+            )
+    except Exception as e:
+        logger.error(f"Error getting financial summary from database: {e}")
+        return FinancialSummary(
+            current_balance_inr="₹0",
+            total_transactions=0,
+            date_range={"earliest": "N/A", "latest": "N/A"},
+            last_updated=datetime.now().isoformat()
+        )
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -195,6 +251,11 @@ async def health_check():
             agent_available=False,
             lm_studio_available=False
         )
+
+@app.get("/api/financial-summary", response_model=FinancialSummary)
+async def get_financial_summary():
+    """Get financial summary directly from the database."""
+    return get_financial_summary_from_db()
 
 # API Routes - grouped under /api prefix for consistency
 @app.post("/chat", response_model=ChatResponse)
