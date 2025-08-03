@@ -24,9 +24,9 @@ import sqlite3
 from contextlib import asynccontextmanager
 
 # Import new generic agent instead of LM Studio specific one
-from .agents.optimized_financial_agent import OptimizedFinancialAgent, get_optimized_financial_agent
+from .agents.financial_agent import GenericFinancialAgent, get_financial_agent
 from .agents.llm_providers import LLMConfig, ProviderType, get_default_config
-from .mcp.persistent_client import PersistentMCPManager, get_persistent_mcp_manager
+from .mcp.client import MCPClientManager
 from .config import config
 
 # Import centralized logging configuration
@@ -41,9 +41,8 @@ setup_logging(
 logger: ContextLogger = get_logger_with_context(__name__)  # Type hint for proper method access
 
 # Global instances
-# mcp_manager = MCPClientManager()  # Replaced with persistent manager
+mcp_manager = MCPClientManager()
 financial_agent = None
-persistent_mcp_manager = None
 
 # Pydantic models for API
 class ChatMessage(BaseModel):
@@ -171,7 +170,7 @@ async def lifespan(app: FastAPI):
         await mcp_manager.initialize_default_servers()
         
         # Initialize the financial agent with default config
-        financial_agent = await get_optimized_financial_agent()
+        financial_agent = await get_financial_agent()
         
         logger.info(f"✅ Backend started successfully with {financial_agent.config.provider.value} provider!")
     except Exception as e:
