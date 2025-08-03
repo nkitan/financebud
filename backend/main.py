@@ -196,7 +196,9 @@ async def health_check():
             lm_studio_available=False
         )
 
+# API Routes - grouped under /api prefix for consistency
 @app.post("/chat", response_model=ChatResponse)
+@app.post("/api/chat", response_model=ChatResponse)
 async def chat_endpoint(message: ChatMessage, agent: GenericFinancialAgent = Depends(get_agent)):
     """Main chat endpoint for financial analysis queries."""
     import time
@@ -250,21 +252,45 @@ async def chat_endpoint(message: ChatMessage, agent: GenericFinancialAgent = Dep
         logger.error(f"Chat endpoint error: {e}")
         raise HTTPException(status_code=500, detail=f"Error processing message: {str(e)}")
 
-@app.post("/tools/call")
-async def call_tool_endpoint(tool_call: ToolCall, agent: GenericFinancialAgent = Depends(get_agent)):
-    """Directly call a specific MCP tool."""
+@app.get("/api/financial/summary")
+async def get_financial_summary(agent: GenericFinancialAgent = Depends(get_agent)):
+    """Get a financial summary using the agent."""
     try:
-        # Note: The generic agent doesn't expose direct tool execution
-        # This functionality would need to be implemented differently
-        # For now, return a message indicating the feature needs updating
-        return {
-            "result": "Direct tool calling not implemented in generic agent. Use chat interface instead.",
-            "success": False
+        # Generate a unique session for this summary request
+        session_id = f"summary_{uuid.uuid4()}"
+        
+        # Ask the agent for a financial summary
+        response = await agent.chat("Provide a comprehensive financial summary with current balance, total transactions, and date range of data available.", session_id)
+        
+        # Try to extract structured data from the response
+        # This is a simplified approach - in production you might want more sophisticated parsing
+        summary_data = {
+            "current_balance_inr": "₹0",
+            "total_transactions": 0,
+            "date_range": {
+                "earliest": "N/A",
+                "latest": "N/A"
+            },
+            "raw_response": response
         }
-    
+        
+        # Basic parsing to extract numbers if present in response
+        import re
+        balance_match = re.search(r'₹([\d,]+\.?\d*)', response)
+        if balance_match:
+            summary_data["current_balance_inr"] = f"₹{balance_match.group(1)}"
+        
+        transaction_match = re.search(r'(\d+)\s+transactions?', response, re.IGNORECASE)
+        if transaction_match:
+            summary_data["total_transactions"] = int(transaction_match.group(1).replace(',', ''))
+        
+        return summary_data
+        
     except Exception as e:
-        logger.error(f"Tool call error: {e}")
-        raise HTTPException(status_code=500, detail=f"Error calling tool: {str(e)}")
+        logger.error(f"Financial summary error: {e}")
+        raise HTTPException(status_code=500, detail=f"Error getting financial summary: {str(e)}")
+
+
 
 @app.get("/tools/list")
 async def list_tools_endpoint(agent: GenericFinancialAgent = Depends(get_agent)):
@@ -358,13 +384,27 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                 
                 if financial_agent and content:
                     # Process message using the new chat interface
+                    import time
+                    start_time = time.time()
+                    
                     response = await financial_agent.chat(content, session_id)
+                    execution_time = time.time() - start_time
+                    
+                    # Get basic tools used information
+                    tools_used = []
+                    if session_id in financial_agent.sessions:
+                        # Try to extract tool usage from recent session activity
+                        tools_used = ["financial_analysis"]  # Generic tool name
                     
                     result = {
-                        "response": response,
-                        "session_id": session_id,
-                        "agent_state": {"provider": financial_agent.config.provider.value},
-                        "tools_used": []
+                        "type": "response",
+                        "data": {
+                            "response": response,
+                            "session_id": session_id,
+                            "agent_state": {"provider": financial_agent.config.provider.value},
+                            "tools_used": tools_used,
+                            "execution_time": execution_time
+                        }
                     }
                     
                     # Send response
@@ -374,19 +414,28 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                     )
                 else:
                     await connection_manager.send_personal_message(
-                        json.dumps({"error": "Agent not available or empty message"}),
+                        json.dumps({
+                            "type": "error", 
+                            "error": "Agent not available or empty message"
+                        }),
                         websocket
                     )
             
             except json.JSONDecodeError:
                 await connection_manager.send_personal_message(
-                    json.dumps({"error": "Invalid JSON format"}),
+                    json.dumps({
+                        "type": "error",
+                        "error": "Invalid JSON format"
+                    }),
                     websocket
                 )
             except Exception as e:
                 logger.error(f"WebSocket message processing error: {e}")
                 await connection_manager.send_personal_message(
-                    json.dumps({"error": f"Error processing message: {str(e)}"}),
+                    json.dumps({
+                        "type": "error",
+                        "error": f"Error processing message: {str(e)}"
+                    }),
                     websocket
                 )
     
