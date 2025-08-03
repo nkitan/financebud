@@ -252,46 +252,6 @@ async def chat_endpoint(message: ChatMessage, agent: GenericFinancialAgent = Dep
         logger.error(f"Chat endpoint error: {e}")
         raise HTTPException(status_code=500, detail=f"Error processing message: {str(e)}")
 
-@app.get("/api/financial/summary")
-async def get_financial_summary(agent: GenericFinancialAgent = Depends(get_agent)):
-    """Get a financial summary using the agent."""
-    try:
-        # Generate a unique session for this summary request
-        session_id = f"summary_{uuid.uuid4()}"
-        
-        # Ask the agent for a financial summary
-        response = await agent.chat("Provide a comprehensive financial summary with current balance, total transactions, and date range of data available.", session_id)
-        
-        # Try to extract structured data from the response
-        # This is a simplified approach - in production you might want more sophisticated parsing
-        summary_data = {
-            "current_balance_inr": "₹0",
-            "total_transactions": 0,
-            "date_range": {
-                "earliest": "N/A",
-                "latest": "N/A"
-            },
-            "raw_response": response
-        }
-        
-        # Basic parsing to extract numbers if present in response
-        import re
-        balance_match = re.search(r'₹([\d,]+\.?\d*)', response)
-        if balance_match:
-            summary_data["current_balance_inr"] = f"₹{balance_match.group(1)}"
-        
-        transaction_match = re.search(r'(\d+)\s+transactions?', response, re.IGNORECASE)
-        if transaction_match:
-            summary_data["total_transactions"] = int(transaction_match.group(1).replace(',', ''))
-        
-        return summary_data
-        
-    except Exception as e:
-        logger.error(f"Financial summary error: {e}")
-        raise HTTPException(status_code=500, detail=f"Error getting financial summary: {str(e)}")
-
-
-
 @app.get("/tools/list")
 async def list_tools_endpoint(agent: GenericFinancialAgent = Depends(get_agent)):
     """List all available MCP tools."""

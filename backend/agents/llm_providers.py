@@ -394,7 +394,7 @@ def get_default_config() -> LLMConfig:
     config_data = defaults[provider]
     
     # Set provider-specific timeout defaults
-    default_timeout = "60" if provider == ProviderType.OLLAMA else "30"
+    default_timeout = "300" if provider == ProviderType.OLLAMA else "30"
     
     return LLMConfig(
         provider=provider,
