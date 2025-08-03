@@ -81,19 +81,37 @@ async def get_account_summary_tool(tool_input: str) -> str:
         client = FastMCPClient("mcp_server.py")
         async with client:
             result = await client.call_tool("get_account_summary", {})
-            return str(result.content) if hasattr(result, 'content') else json.dumps(result, indent=2)
+            # Extract the actual text content from FastMCP result
+            if hasattr(result, 'content') and result.content and len(result.content) > 0:
+                content_item = result.content[0]
+                text_content = getattr(content_item, 'text', None)
+                if text_content is not None:
+                    return str(text_content)
+            if hasattr(result, 'data'):
+                return str(result.data)
+            return json.dumps(result.__dict__ if hasattr(result, '__dict__') else str(result), indent=2)
     except Exception as e:
+        logger.error(f"Error getting account summary: {e}")
         return f"Error getting account summary: {str(e)}"
 
 async def search_transactions_tool(tool_input: str) -> str:
     """Search for transactions matching a pattern."""
     try:
         client = FastMCPClient("mcp_server.py")
-        params = {"search_term": tool_input.strip()}
+        params = {"description_pattern": tool_input.strip()}
         async with client:
             result = await client.call_tool("search_transactions", params)
-            return str(result.content) if hasattr(result, 'content') else json.dumps(result, indent=2)
+            # Extract the actual text content from FastMCP result
+            if hasattr(result, 'content') and result.content and len(result.content) > 0:
+                content_item = result.content[0]
+                text_content = getattr(content_item, 'text', None)
+                if text_content is not None:
+                    return str(text_content)
+            if hasattr(result, 'data'):
+                return str(result.data)
+            return json.dumps(result.__dict__ if hasattr(result, '__dict__') else str(result), indent=2)
     except Exception as e:
+        logger.error(f"Error searching transactions: {e}")
         return f"Error searching transactions: {str(e)}"
 
 async def get_transactions_by_date_range_tool(tool_input: str) -> str:
@@ -120,8 +138,17 @@ async def get_transactions_by_date_range_tool(tool_input: str) -> str:
             
         async with client:
             result = await client.call_tool("get_transactions_by_date_range", params)
-            return str(result.content) if hasattr(result, 'content') else json.dumps(result, indent=2)
+            # Extract the actual text content from FastMCP result
+            if hasattr(result, 'content') and result.content and len(result.content) > 0:
+                content_item = result.content[0]
+                text_content = getattr(content_item, 'text', None)
+                if text_content is not None:
+                    return str(text_content)
+            if hasattr(result, 'data'):
+                return str(result.data)
+            return json.dumps(result.__dict__ if hasattr(result, '__dict__') else str(result), indent=2)
     except Exception as e:
+        logger.error(f"Error getting transactions by date range: {e}")
         return f"Error getting transactions by date range: {str(e)}"
 
 async def get_monthly_summary_tool(tool_input: str) -> str:
@@ -203,8 +230,10 @@ class GenericFinancialAgent:
         self.tool_map = {tool.name: tool.func for tool in self.tools}
         self.sessions: Dict[str, List[ConversationMessage]] = {}
         
-        # System prompt for financial analysis
+                # System prompt for financial analysis
         self.system_prompt = f"""You are an expert financial analysis assistant with access to real banking and transaction data from Indian bank accounts.
+
+Current LLM Provider: {self.config.provider.value} ({self.config.model})
 
 Your capabilities include:
 - Account balance and transaction summaries with amounts in Indian Rupees (₹)
@@ -214,7 +243,7 @@ Your capabilities include:
 - Recurring payment identification and analysis
 - Custom financial queries and detailed analytics
 
-Current LLM Provider: {self.config.provider.value} ({self.config.model})
+IMPORTANT: You have access to specialized financial tools. ALWAYS use these tools to get real data. Never attempt to write Python code or simulate data.
 
 Guidelines for responses:
 - Always format monetary amounts in Indian Rupees (₹) with proper comma separation
@@ -222,12 +251,14 @@ Guidelines for responses:
 - Use the available tools to get real data rather than making assumptions
 - Be specific about Indian banking patterns (UPI, NEFT, IMPS, etc.)
 - Suggest concrete steps for financial improvement
-- When users ask about balances, summaries, or overviews, use the get_account_summary tool
-- When users ask about specific transactions or want to search, use the search_transactions tool
-- When users ask about monthly spending or analysis, use the get_monthly_summary tool
-- When users ask about trends or patterns over time, use the analyze_spending_trends tool
-- When users ask specifically about UPI or digital payments, use the get_upi_transaction_analysis tool
-- When users specify date ranges, use the get_transactions_by_date_range tool
+
+Tool Usage:
+- For account balances/summaries: use get_account_summary tool
+- For transaction searches: use search_transactions tool  
+- For monthly analysis: use get_monthly_summary tool
+- For trends over time: use analyze_spending_trends tool
+- For UPI analysis: use get_upi_transaction_analysis tool
+- For date ranges: use get_transactions_by_date_range tool
 
 Always call the appropriate tool first to get current data, then provide analysis and insights based on the real data."""
 
@@ -289,9 +320,52 @@ Always call the appropriate tool first to get current data, then provide analysi
     async def _call_llm_with_tools(self, session_id: str) -> Dict[str, Any]:
         """Call LLM with tools available."""
         messages = self._format_messages_for_api(session_id)
-        tools = [tool.to_openai_format() for tool in self.tools]
         
-        return await self.provider.chat_completion(messages, tools)
+        # Get the user's last message to select relevant tools
+        user_message = ""
+        for msg in reversed(messages):
+            if msg["role"] == "user":
+                user_message = msg["content"].lower()
+                break
+        
+        # Select relevant tools based on user query to avoid overwhelming Ollama
+        relevant_tools = self._select_relevant_tools(user_message)
+        
+        return await self.provider.chat_completion(messages, relevant_tools)
+    
+    def _select_relevant_tools(self, user_query: str) -> List[Dict[str, Any]]:
+        """Select relevant tools based on user query to reduce token overhead."""
+        all_tools = [tool.to_openai_format() for tool in self.tools]
+        
+        # Keywords to tool mapping
+        tool_keywords = {
+            "get_account_summary": ["balance", "summary", "account", "overview"],
+            "search_transactions": ["search", "find", "transaction", "payment"],
+            "get_transactions_by_date_range": ["date", "range", "between", "from", "to", "period"],
+            "get_monthly_summary": ["month", "monthly", "spending"],
+            "analyze_spending_trends": ["trend", "analysis", "pattern", "over time"],
+            "get_upi_transaction_analysis": ["upi", "digital", "payment"]
+        }
+        
+        # If query is short or general, return only the most common tools
+        if len(user_query.split()) <= 3:
+            primary_tools = ["get_account_summary", "search_transactions"]
+            return [tool for tool in all_tools if tool["function"]["name"] in primary_tools]
+        
+        # Select tools based on keywords
+        selected_tool_names = set()
+        for tool_name, keywords in tool_keywords.items():
+            if any(keyword in user_query for keyword in keywords):
+                selected_tool_names.add(tool_name)
+        
+        # If no specific tools matched, return the most common ones
+        if not selected_tool_names:
+            selected_tool_names = {"get_account_summary", "search_transactions"}
+        
+        # Limit to maximum 3 tools to avoid overwhelming Ollama
+        selected_tool_names = list(selected_tool_names)[:3]
+        
+        return [tool for tool in all_tools if tool["function"]["name"] in selected_tool_names]
 
     async def _call_llm_without_tools(self, session_id: str) -> Dict[str, Any]:
         """Call LLM without tools for final response."""
@@ -302,13 +376,31 @@ Always call the appropriate tool first to get current data, then provide analysi
     def _format_messages_for_api(self, session_id: str) -> List[Dict[str, Any]]:
         """Format conversation messages for LLM API."""
         messages = []
+        
+        # Always include system message
+        system_msg = None
+        user_assistant_pairs = []
+        
         for msg in self.sessions[session_id]:
-            formatted = {"role": msg.role, "content": msg.content}
-            if msg.tool_calls:
-                formatted["tool_calls"] = msg.tool_calls
-            if msg.tool_call_id:
-                formatted["tool_call_id"] = msg.tool_call_id
-            messages.append(formatted)
+            if msg.role == "system":
+                system_msg = {"role": "system", "content": msg.content}
+            elif msg.role == "user":
+                user_assistant_pairs.append({"role": "user", "content": msg.content})
+            elif msg.role == "assistant" and not msg.tool_calls:
+                # Only include assistant messages that are final responses, not tool calls
+                if user_assistant_pairs and len(user_assistant_pairs) > 0:
+                    user_assistant_pairs.append({"role": "assistant", "content": msg.content})
+            # Skip tool call messages and tool response messages to avoid confusing the model
+        
+        # Build clean message history
+        if system_msg:
+            messages.append(system_msg)
+        
+        # Only include the last few user-assistant pairs to keep context manageable
+        # This prevents the model from getting confused by complex tool calling history
+        recent_pairs = user_assistant_pairs[-6:]  # Last 3 user-assistant pairs
+        messages.extend(recent_pairs)
+        
         return messages
 
     def _has_tool_calls(self, response: Dict[str, Any]) -> bool:

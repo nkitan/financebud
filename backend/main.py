@@ -206,22 +206,44 @@ async def chat_endpoint(message: ChatMessage, agent: GenericFinancialAgent = Dep
         # Generate session ID if not provided
         session_id = message.session_id or str(uuid.uuid4())
         
+        # Get session history before the new message to track tools used
+        history_before = agent.get_session_history(session_id)
+        messages_before = len(history_before)
+        
         # Process the message using the new chat interface
         response = await agent.chat(message.content, session_id)
         
         # Calculate execution time
         execution_time = time.time() - start_time
         
-        # Get session history for additional context
-        history = agent.get_session_history(session_id)
+        # Get session history after to track which tools were used
+        history_after = agent.get_session_history(session_id)
+        
+        # Extract tools used from the session history
+        tools_used = []
+        for msg in history_after[messages_before:]:
+            if msg["role"] == "tool":
+                # Try to extract tool name from the conversation context
+                tools_used.append("financial_tool")  # Generic for now
+        
+        # If we can access the agent's session directly, get more specific tool names
+        if session_id in agent.sessions:
+            session_msgs = agent.sessions[session_id]
+            for msg in session_msgs:
+                if hasattr(msg, 'tool_calls') and msg.tool_calls:
+                    for tool_call in msg.tool_calls:
+                        if 'function' in tool_call and 'name' in tool_call['function']:
+                            tool_name = tool_call['function']['name']
+                            if tool_name not in tools_used:
+                                tools_used.append(tool_name)
         
         return ChatResponse(
             response=response,
             session_id=session_id,
             agent_state={"provider": agent.config.provider.value, "model": agent.config.model},
-            tools_used=[],  # Could be enhanced to track tool usage
+            tools_used=tools_used,
             execution_time=execution_time,
-            metadata={"messages_in_session": len(history)}
+            metadata={"messages_in_session": len(history_after)}
         )
     
     except Exception as e:

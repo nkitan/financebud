@@ -9,6 +9,7 @@ making it easy to switch between Ollama, OpenAI, Google Gemini, OpenRouter, etc.
 import os
 import json
 import logging
+import asyncio
 import aiohttp
 from abc import ABC, abstractmethod
 from typing import Dict, List, Any, Optional
@@ -100,13 +101,26 @@ class OllamaProvider(LLMProvider):
                     timeout=aiohttp.ClientTimeout(total=self.config.timeout)
                 ) as response:
                     if response.status == 200:
-                        return await response.json()
+                        result = await response.json()
+                        logger.debug(f"Ollama API success: {result}")
+                        return result
                     else:
                         error_text = await response.text()
-                        raise Exception(f"Ollama returned status {response.status}: {error_text}")
+                        error_msg = f"Ollama returned status {response.status}: {error_text}"
+                        logger.error(error_msg)
+                        raise Exception(error_msg)
+        except asyncio.TimeoutError as e:
+            error_msg = f"Ollama API timeout after {self.config.timeout}s"
+            logger.error(error_msg)
+            return self._error_response(error_msg)
+        except aiohttp.ClientError as e:
+            error_msg = f"Ollama API client error: {str(e)}"
+            logger.error(error_msg)
+            return self._error_response(error_msg)
         except Exception as e:
-            logger.error(f"Ollama API call failed: {e}")
-            return self._error_response(str(e))
+            error_msg = f"Ollama API unexpected error: {type(e).__name__}: {str(e)}"
+            logger.error(error_msg)
+            return self._error_response(error_msg)
     
     async def test_connection(self) -> bool:
         """Test Ollama connection."""
@@ -121,9 +135,17 @@ class OllamaProvider(LLMProvider):
                     },
                     timeout=aiohttp.ClientTimeout(total=5)
                 ) as response:
-                    return response.status == 200
+                    is_ok = response.status == 200
+                    if is_ok:
+                        logger.debug("Ollama connection test successful")
+                    else:
+                        logger.warning(f"Ollama connection test failed with status {response.status}")
+                    return is_ok
+        except asyncio.TimeoutError:
+            logger.warning("Ollama connection test timed out")
+            return False
         except Exception as e:
-            logger.warning(f"Ollama connection test failed: {e}")
+            logger.warning(f"Ollama connection test failed: {type(e).__name__}: {str(e)}")
             return False
 
 class OpenAIProvider(LLMProvider):
@@ -371,12 +393,15 @@ def get_default_config() -> LLMConfig:
     
     config_data = defaults[provider]
     
+    # Set provider-specific timeout defaults
+    default_timeout = "60" if provider == ProviderType.OLLAMA else "30"
+    
     return LLMConfig(
         provider=provider,
         base_url=config_data["base_url"],
         api_key=config_data["api_key"],
         model=config_data["model"],
-        timeout=int(os.getenv("LLM_TIMEOUT", "30")),
+        timeout=int(os.getenv("LLM_TIMEOUT", default_timeout)),
         max_tokens=int(os.getenv("LLM_MAX_TOKENS", "1500")),
         temperature=float(os.getenv("LLM_TEMPERATURE", "0.7"))
     )
