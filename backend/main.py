@@ -442,10 +442,12 @@ async def service_unavailable_handler(request, exc):
     )
 
 if __name__ == "__main__":
+    # Use wsproto instead of websockets to avoid deprecation warnings
     uvicorn.run(
         "backend.main:app",
         host=config.server.host,
         port=config.server.port,
         reload=config.server.debug,
-        log_level="info"
+        log_level="info",
+        ws="wsproto"  # Use wsproto instead of websockets
     )
