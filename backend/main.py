@@ -23,7 +23,7 @@ import os
 from contextlib import asynccontextmanager
 
 # Import new generic agent instead of LM Studio specific one
-from .agents.financial_agent_generic import GenericFinancialAgent, get_financial_agent
+from .agents.financial_agent import GenericFinancialAgent, get_financial_agent
 from .agents.llm_providers import LLMConfig, ProviderType, get_default_config
 from .mcp.client import MCPClientManager
 from .config import config

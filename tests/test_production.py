@@ -19,7 +19,7 @@ from pathlib import Path
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
-from backend.agents.financial_agent_generic import GenericFinancialAgent
+from backend.agents.financial_agent import GenericFinancialAgent
 from backend.agents.llm_providers import LLMConfig, ProviderType, get_default_config
 from fastmcp import Client as FastMCPClient
 

@@ -11,7 +11,7 @@ from pathlib import Path
 project_root = Path(__file__).parent
 sys.path.insert(0, str(project_root))
 
-from backend.agents.financial_agent_generic import GenericFinancialAgent
+from backend.agents.financial_agent import GenericFinancialAgent
 from backend.agents.llm_providers import get_default_config
 
 async def test_improved_agent():

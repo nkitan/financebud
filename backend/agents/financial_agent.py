@@ -1,24 +1,31 @@
 """
-Production-Ready Financial Analysis Agent using LM Studio Tool Calling
-====================================================================
+Generic Financial Analysis Agent
+===============================
 
-This module implements a financial analysis agent that properly uses LM Studio's
-tool calling API according to their specification. The agent:
-- Uses LM Studio's native tool calling format
-- Properly handles tool_calls in responses
-- Follows the documented tool calling flow
-- Provides comprehensive financial analysis
+This module implements a financial analysis agent that can work with any
+OpenAI-compatible LLM provider (Ollama, OpenAI, Gemini, OpenRouter, etc.).
+
+Key improvements:
+- Provider-agnostic design using OpenAI-compatible APIs
+- Easy switching between different LLM providers via configuration
+- Standard tool calling implementation
+- Environment-based configuration
 """
 
 import asyncio
 import json
 import logging
 import time
-import aiohttp
 import uuid
 from datetime import datetime, timedelta
 from typing import Dict, List, Any, Optional
 from pydantic import BaseModel, Field
+
+# Import our generic LLM providers
+from .llm_providers import (
+    LLMConfig, LLMProvider, ProviderType,
+    create_provider, get_default_config
+)
 
 # FastMCP client for proper MCP protocol handling
 from fastmcp import Client as FastMCPClient
@@ -48,7 +55,7 @@ class FinancialTool:
         self.func = func
     
     def to_openai_format(self) -> Dict[str, Any]:
-        """Convert to OpenAI tool format for LM Studio."""
+        """Convert to OpenAI tool format for LLM providers."""
         return {
             "type": "function",
             "function": {
@@ -67,26 +74,44 @@ class FinancialTool:
             }
         }
 
-# Define financial analysis tools
+# Define financial analysis tools (same as before)
 async def get_account_summary_tool(tool_input: str) -> str:
     """Get account summary with current balance and transaction overview."""
     try:
         client = FastMCPClient("mcp_server.py")
         async with client:
             result = await client.call_tool("get_account_summary", {})
-            return str(result.content) if hasattr(result, 'content') else json.dumps(result, indent=2)
+            # Extract the actual text content from FastMCP result
+            if hasattr(result, 'content') and result.content and len(result.content) > 0:
+                content_item = result.content[0]
+                text_content = getattr(content_item, 'text', None)
+                if text_content is not None:
+                    return str(text_content)
+            if hasattr(result, 'data'):
+                return str(result.data)
+            return json.dumps(result.__dict__ if hasattr(result, '__dict__') else str(result), indent=2)
     except Exception as e:
+        logger.error(f"Error getting account summary: {e}")
         return f"Error getting account summary: {str(e)}"
 
 async def search_transactions_tool(tool_input: str) -> str:
     """Search for transactions matching a pattern."""
     try:
         client = FastMCPClient("mcp_server.py")
-        params = {"search_term": tool_input.strip()}
+        params = {"description_pattern": tool_input.strip()}
         async with client:
             result = await client.call_tool("search_transactions", params)
-            return str(result.content) if hasattr(result, 'content') else json.dumps(result, indent=2)
+            # Extract the actual text content from FastMCP result
+            if hasattr(result, 'content') and result.content and len(result.content) > 0:
+                content_item = result.content[0]
+                text_content = getattr(content_item, 'text', None)
+                if text_content is not None:
+                    return str(text_content)
+            if hasattr(result, 'data'):
+                return str(result.data)
+            return json.dumps(result.__dict__ if hasattr(result, '__dict__') else str(result), indent=2)
     except Exception as e:
+        logger.error(f"Error searching transactions: {e}")
         return f"Error searching transactions: {str(e)}"
 
 async def get_transactions_by_date_range_tool(tool_input: str) -> str:
@@ -113,8 +138,17 @@ async def get_transactions_by_date_range_tool(tool_input: str) -> str:
             
         async with client:
             result = await client.call_tool("get_transactions_by_date_range", params)
-            return str(result.content) if hasattr(result, 'content') else json.dumps(result, indent=2)
+            # Extract the actual text content from FastMCP result
+            if hasattr(result, 'content') and result.content and len(result.content) > 0:
+                content_item = result.content[0]
+                text_content = getattr(content_item, 'text', None)
+                if text_content is not None:
+                    return str(text_content)
+            if hasattr(result, 'data'):
+                return str(result.data)
+            return json.dumps(result.__dict__ if hasattr(result, '__dict__') else str(result), indent=2)
     except Exception as e:
+        logger.error(f"Error getting transactions by date range: {e}")
         return f"Error getting transactions by date range: {str(e)}"
 
 async def get_monthly_summary_tool(tool_input: str) -> str:
@@ -176,13 +210,12 @@ async def get_upi_transaction_analysis_tool(tool_input: str) -> str:
     except Exception as e:
         return f"Error analyzing UPI transactions: {str(e)}"
 
-class LMStudioToolAgent:
-    """Financial analysis agent using LM Studio's tool calling API."""
+class GenericFinancialAgent:
+    """Financial analysis agent using generic LLM providers."""
     
-    def __init__(self, base_url: str = "http://localhost:1234/v1"):
-        self.base_url = base_url
-        self.chat_url = f"{base_url}/chat/completions"
-        self.timeout = 30
+    def __init__(self, config: Optional[LLMConfig] = None):
+        self.config = config or get_default_config()
+        self.provider = create_provider(self.config)
         
         # Initialize financial tools
         self.tools = [
@@ -197,8 +230,10 @@ class LMStudioToolAgent:
         self.tool_map = {tool.name: tool.func for tool in self.tools}
         self.sessions: Dict[str, List[ConversationMessage]] = {}
         
-        # System prompt for financial analysis
-        self.system_prompt = """You are an expert financial analysis assistant with access to real banking and transaction data from Indian bank accounts.
+                # System prompt for financial analysis
+        self.system_prompt = f"""You are an expert financial analysis assistant with access to real banking and transaction data from Indian bank accounts.
+
+Current LLM Provider: {self.config.provider.value} ({self.config.model})
 
 Your capabilities include:
 - Account balance and transaction summaries with amounts in Indian Rupees (₹)
@@ -208,44 +243,34 @@ Your capabilities include:
 - Recurring payment identification and analysis
 - Custom financial queries and detailed analytics
 
+IMPORTANT: You have access to specialized financial tools. ALWAYS use these tools to get real data. Never attempt to write Python code or simulate data.
+
 Guidelines for responses:
 - Always format monetary amounts in Indian Rupees (₹) with proper comma separation
 - Provide actionable insights and practical recommendations
 - Use the available tools to get real data rather than making assumptions
 - Be specific about Indian banking patterns (UPI, NEFT, IMPS, etc.)
 - Suggest concrete steps for financial improvement
-- When users ask about balances, summaries, or overviews, use the get_account_summary tool
-- When users ask about specific transactions or want to search, use the search_transactions tool
-- When users ask about monthly spending or analysis, use the get_monthly_summary tool
-- When users ask about trends or patterns over time, use the analyze_spending_trends tool
-- When users ask specifically about UPI or digital payments, use the get_upi_transaction_analysis tool
-- When users specify date ranges, use the get_transactions_by_date_range tool
+
+Tool Usage:
+- For account balances/summaries: use get_account_summary tool
+- For transaction searches: use search_transactions tool  
+- For monthly analysis: use get_monthly_summary tool
+- For trends over time: use analyze_spending_trends tool
+- For UPI analysis: use get_upi_transaction_analysis tool
+- For date ranges: use get_transactions_by_date_range tool
 
 Always call the appropriate tool first to get current data, then provide analysis and insights based on the real data."""
 
     async def test_connection(self) -> bool:
-        """Test if LM Studio is available."""
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    self.chat_url,
-                    json={
-                        "model": "local-model",
-                        "messages": [{"role": "user", "content": "test"}],
-                        "max_tokens": 5
-                    },
-                    timeout=aiohttp.ClientTimeout(total=5)
-                ) as response:
-                    return response.status == 200
-        except Exception as e:
-            logger.warning(f"LM Studio connection test failed: {e}")
-            return False
+        """Test if the LLM provider is available."""
+        return await self.provider.test_connection()
 
     async def chat(self, message: str, session_id: str = "default") -> str:
         """
-        Main chat interface following LM Studio tool calling flow.
+        Main chat interface using generic LLM providers.
         
-        This implements the exact flow from LM Studio documentation:
+        This implements the standard OpenAI tool calling flow:
         1. Send message with tools to LLM
         2. Parse tool_calls from response
         3. Execute tools and add results to conversation
@@ -293,68 +318,89 @@ Always call the appropriate tool first to get current data, then provide analysi
             return f"I encountered an error while processing your request: {str(e)}"
 
     async def _call_llm_with_tools(self, session_id: str) -> Dict[str, Any]:
-        """Call LM Studio with tools available."""
+        """Call LLM with tools available."""
         messages = self._format_messages_for_api(session_id)
-        tools = [tool.to_openai_format() for tool in self.tools]
         
-        payload = {
-            "model": "local-model",
-            "messages": messages,
-            "tools": tools,
-            "max_tokens": 1500,
-            "temperature": 0.7
+        # Get the user's last message to select relevant tools
+        user_message = ""
+        for msg in reversed(messages):
+            if msg["role"] == "user":
+                user_message = msg["content"].lower()
+                break
+        
+        # Select relevant tools based on user query to avoid overwhelming Ollama
+        relevant_tools = self._select_relevant_tools(user_message)
+        
+        return await self.provider.chat_completion(messages, relevant_tools)
+    
+    def _select_relevant_tools(self, user_query: str) -> List[Dict[str, Any]]:
+        """Select relevant tools based on user query to reduce token overhead."""
+        all_tools = [tool.to_openai_format() for tool in self.tools]
+        
+        # Keywords to tool mapping
+        tool_keywords = {
+            "get_account_summary": ["balance", "summary", "account", "overview"],
+            "search_transactions": ["search", "find", "transaction", "payment"],
+            "get_transactions_by_date_range": ["date", "range", "between", "from", "to", "period"],
+            "get_monthly_summary": ["month", "monthly", "spending"],
+            "analyze_spending_trends": ["trend", "analysis", "pattern", "over time"],
+            "get_upi_transaction_analysis": ["upi", "digital", "payment"]
         }
         
-        return await self._make_api_call(payload)
+        # If query is short or general, return only the most common tools
+        if len(user_query.split()) <= 3:
+            primary_tools = ["get_account_summary", "search_transactions"]
+            return [tool for tool in all_tools if tool["function"]["name"] in primary_tools]
+        
+        # Select tools based on keywords
+        selected_tool_names = set()
+        for tool_name, keywords in tool_keywords.items():
+            if any(keyword in user_query for keyword in keywords):
+                selected_tool_names.add(tool_name)
+        
+        # If no specific tools matched, return the most common ones
+        if not selected_tool_names:
+            selected_tool_names = {"get_account_summary", "search_transactions"}
+        
+        # Limit to maximum 3 tools to avoid overwhelming Ollama
+        selected_tool_names = list(selected_tool_names)[:3]
+        
+        return [tool for tool in all_tools if tool["function"]["name"] in selected_tool_names]
 
     async def _call_llm_without_tools(self, session_id: str) -> Dict[str, Any]:
-        """Call LM Studio without tools for final response."""
+        """Call LLM without tools for final response."""
         messages = self._format_messages_for_api(session_id)
         
-        payload = {
-            "model": "local-model",
-            "messages": messages,
-            "max_tokens": 1500,
-            "temperature": 0.7
-        }
-        
-        return await self._make_api_call(payload)
-
-    async def _make_api_call(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        """Make API call to LM Studio."""
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    self.chat_url,
-                    json=payload,
-                    timeout=aiohttp.ClientTimeout(total=self.timeout)
-                ) as response:
-                    if response.status == 200:
-                        return await response.json()
-                    else:
-                        error_text = await response.text()
-                        raise Exception(f"LM Studio returned status {response.status}: {error_text}")
-        except Exception as e:
-            logger.error(f"API call failed: {e}")
-            return {
-                "choices": [{
-                    "message": {
-                        "role": "assistant",
-                        "content": f"I'm experiencing connection issues with the AI service: {str(e)}"
-                    }
-                }]
-            }
+        return await self.provider.chat_completion(messages)
 
     def _format_messages_for_api(self, session_id: str) -> List[Dict[str, Any]]:
-        """Format conversation messages for LM Studio API."""
+        """Format conversation messages for LLM API."""
         messages = []
+        
+        # Always include system message
+        system_msg = None
+        user_assistant_pairs = []
+        
         for msg in self.sessions[session_id]:
-            formatted = {"role": msg.role, "content": msg.content}
-            if msg.tool_calls:
-                formatted["tool_calls"] = msg.tool_calls
-            if msg.tool_call_id:
-                formatted["tool_call_id"] = msg.tool_call_id
-            messages.append(formatted)
+            if msg.role == "system":
+                system_msg = {"role": "system", "content": msg.content}
+            elif msg.role == "user":
+                user_assistant_pairs.append({"role": "user", "content": msg.content})
+            elif msg.role == "assistant" and not msg.tool_calls:
+                # Only include assistant messages that are final responses, not tool calls
+                if user_assistant_pairs and len(user_assistant_pairs) > 0:
+                    user_assistant_pairs.append({"role": "assistant", "content": msg.content})
+            # Skip tool call messages and tool response messages to avoid confusing the model
+        
+        # Build clean message history
+        if system_msg:
+            messages.append(system_msg)
+        
+        # Only include the last few user-assistant pairs to keep context manageable
+        # This prevents the model from getting confused by complex tool calling history
+        recent_pairs = user_assistant_pairs[-6:]  # Last 3 user-assistant pairs
+        messages.extend(recent_pairs)
+        
         return messages
 
     def _has_tool_calls(self, response: Dict[str, Any]) -> bool:
@@ -423,7 +469,9 @@ Always call the appropriate tool first to get current data, then provide analysi
         """Get agent health status."""
         health = {
             "status": "healthy",
-            "lm_studio_available": await self.test_connection(),
+            "provider": self.config.provider.value,
+            "model": self.config.model,
+            "provider_available": await self.test_connection(),
             "tools_available": len(self.tools),
             "active_sessions": len(self.sessions)
         }
@@ -454,41 +502,29 @@ Always call the appropriate tool first to get current data, then provide analysi
                 })
         return history
 
+    def switch_provider(self, config: LLMConfig):
+        """Switch to a different LLM provider."""
+        self.config = config
+        self.provider = create_provider(config)
+        
+        # Update system prompt to reflect new provider
+        provider_info = f"Current LLM Provider: {self.config.provider.value} ({self.config.model})"
+        self.system_prompt = self.system_prompt.replace(
+            self.system_prompt.split('\n')[6],  # Line with provider info
+            provider_info
+        )
+        
+        # Update existing sessions with new system prompt
+        for session_id in self.sessions:
+            if self.sessions[session_id] and self.sessions[session_id][0].role == "system":
+                self.sessions[session_id][0].content = self.system_prompt
+
 # Global agent instance
 _agent = None
 
-async def get_financial_agent() -> LMStudioToolAgent:
+async def get_financial_agent(config: Optional[LLMConfig] = None) -> GenericFinancialAgent:
     """Get or create the global financial agent instance."""
     global _agent
-    if _agent is None:
-        _agent = LMStudioToolAgent()
+    if _agent is None or (config and config != _agent.config):
+        _agent = GenericFinancialAgent(config)
     return _agent
-
-# Backward compatibility class for existing code
-class FinancialAnalysisAgent:
-    """Compatibility wrapper for the new LM Studio tool agent."""
-    
-    def __init__(self, mcp_manager=None):
-        self.agent = None
-    
-    async def initialize(self):
-        """Initialize the agent."""
-        self.agent = await get_financial_agent()
-    
-    async def chat(self, message: str, session_id: str = "default") -> str:
-        """Chat with the financial agent."""
-        if not self.agent:
-            await self.initialize()
-        return await self.agent.chat(message, session_id)
-    
-    async def get_health(self) -> Dict[str, Any]:
-        """Get health status."""
-        if not self.agent:
-            await self.initialize()
-        return await self.agent.get_health()
-    
-    def get_session_history(self, session_id: str) -> List[Dict[str, Any]]:
-        """Get session history."""
-        if not self.agent:
-            return []
-        return self.agent.get_session_history(session_id)
