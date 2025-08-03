@@ -61,7 +61,7 @@ def get_account_summary() -> str:
         # Use cached queries for better performance
         total_result = db_manager.execute_query(
             "SELECT COUNT(*) as count FROM transactions",
-            cache_ttl=30  # Cache for 30 seconds
+            cache_ttl=300  # Cache for 30 seconds
         )
         total_transactions = total_result.data[0]['count']
         
@@ -73,13 +73,13 @@ def get_account_summary() -> str:
         
         latest_balance_result = db_manager.execute_query(
             "SELECT balance FROM transactions ORDER BY transaction_date DESC, transaction_id DESC LIMIT 1",
-            cache_ttl=10  # Cache for 10 seconds
+            cache_ttl=300  # Cache for 5 minutes
         )
         latest_balance = latest_balance_result.data[0]['balance']
         
         totals_result = db_manager.execute_query(
             "SELECT SUM(debit_amount) as total_debits, SUM(credit_amount) as total_credits FROM transactions WHERE debit_amount IS NOT NULL OR credit_amount IS NOT NULL",
-            cache_ttl=60  # Cache for 1 minute
+            cache_ttl=300  # Cache for 5 minutes
         )
         totals = totals_result.data[0]
         
@@ -510,18 +510,20 @@ def get_performance_stats() -> str:
         return serialize_result({"error": f"Error getting performance stats: {str(e)}"})
 
 if __name__ == "__main__":
+    import sys
     try:
-        print("🚀 Starting Optimized Financial MCP Server...")
-        print(f"📊 Database: {db_manager.database_path}")
-        print(f"🔄 Connection pool size: {db_manager.connection_pool.max_connections}")
-        print(f"💾 Cache size: {db_manager.query_cache.max_size}")
-        print("✅ Optimized Financial MCP Server ready for connections!")
+        # Print startup messages to stderr to avoid interfering with JSON-RPC on stdout
+        print("🚀 Starting Optimized Financial MCP Server...", file=sys.stderr)
+        print(f"📊 Database: {db_manager.database_path}", file=sys.stderr)
+        print(f"🔄 Connection pool size: {db_manager.connection_pool.max_connections}", file=sys.stderr)
+        print(f"💾 Cache size: {db_manager.query_cache.max_size}", file=sys.stderr)
+        print("✅ Optimized Financial MCP Server ready for connections!", file=sys.stderr)
         mcp.run()
     except KeyboardInterrupt:
-        print("\n🛑 Shutting down Optimized Financial MCP Server...")
+        print("\n🛑 Shutting down Optimized Financial MCP Server...", file=sys.stderr)
         db_manager.close()
-        print("✅ Server stopped gracefully")
+        print("✅ Server stopped gracefully", file=sys.stderr)
     except Exception as e:
-        print(f"❌ Server error: {e}")
+        print(f"❌ Server error: {e}", file=sys.stderr)
         db_manager.close()
         exit(1)

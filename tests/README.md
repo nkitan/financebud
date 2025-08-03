@@ -144,25 +144,25 @@ When adding new tests:
 ### Run All Production Tests
 ```bash
 cd /home/notroot/Work/financebud
-.venv/bin/python tests/test_production.py
+venv/bin/python tests/test_production.py
 ```
 
 ### Test FastMCP Tools
 ```bash
 cd /home/notroot/Work/financebud
-.venv/bin/python tests/test_fastmcp_tools.py
+venv/bin/python tests/test_fastmcp_tools.py
 ```
 
 ### List Available MCP Tools
 ```bash
 cd /home/notroot/Work/financebud
-.venv/bin/python tests/list_mcp_tools.py
+venv/bin/python tests/list_mcp_tools.py
 ```
 
 ## Test Requirements
 
 All tests require:
-- Python virtual environment activated (`.venv/`)
+- Python virtual environment activated (`venv/`)
 - SQLite database (`financial_data.db`) with transaction data
 - MCP server (`mcp_server.py`) accessible
 - LM Studio running on `localhost:1234` (optional for some tests)

@@ -54,7 +54,7 @@ async def test_tool_support(model_name: str):
             async with session.post(
                 "http://localhost:11434/v1/chat/completions",
                 json=payload,
-                timeout=aiohttp.ClientTimeout(total=30)
+                timeout=aiohttp.ClientTimeout(total=300)
             ) as response:
                 if response.status == 200:
                     result = await response.json()

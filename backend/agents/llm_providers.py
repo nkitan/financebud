@@ -36,7 +36,7 @@ class LLMConfig:
     base_url: str
     api_key: Optional[str] = None
     model: str = "llama3.1"
-    timeout: int = 30
+    timeout: int = 300
     max_tokens: int = 1500
     temperature: float = 0.7
 

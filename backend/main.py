@@ -208,130 +208,124 @@ async def health_check():
         logger.error(f"Health check failed: {e}")
         raise HTTPException(status_code=500, detail=f"Health check failed: {str(e)}")
 
-@app.post("/chat", response_model=ChatResponse)
+@app.post("/api/chat", response_model=ChatResponse)
 async def chat_endpoint(message: ChatMessage, agent: FinancialAgent = Depends(get_agent)):
-    """Process chat messages with performance tracking."""
-    start_time = datetime.now()
-    
+    """Handle chat messages via HTTP when WebSocket is not available."""
     try:
-        logger.info(f"Processing chat message: {message.content[:100]}...")
+        start_time = datetime.now()
         
-        # Process message with the agent
+        # Process the message with the financial agent
         response = await agent.process_message(message.content)
         
         processing_time = (datetime.now() - start_time).total_seconds()
         
-        logger.info(f"Chat processed in {processing_time:.3f}s")
+        # Get session ID (use provided or generate new one)
+        session_id = message.session_id or str(uuid.uuid4())
         
         return ChatResponse(
             response=response,
-            session_id=agent.session_id,
+            session_id=session_id,
             processing_time=processing_time,
-            tool_calls=[]  # Could be extracted from agent if needed
+            tool_calls=[]  # TODO: Extract tool calls from agent response if needed
         )
         
     except Exception as e:
-        processing_time = (datetime.now() - start_time).total_seconds()
-        logger.error(f"Chat error: {e} (processing time: {processing_time:.3f}s)")
-        raise HTTPException(status_code=500, detail=f"Error processing message: {str(e)}")
-
-@app.get("/tools", response_model=ToolListResponse)
-async def list_tools_endpoint(agent: FinancialAgent = Depends(get_agent)):
-    """List all available financial analysis tools."""
-    try:
-        tools = agent.get_openai_tools()
-        
-        # Get MCP server information
-        server_count = 0
-        if mcp_manager:
-            servers = await mcp_manager.get_all_tools()
-            server_count = len(servers)
-        
-        return ToolListResponse(
-            tools=tools,
-            server_count=server_count
+        logger.error(f"Chat endpoint error: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to process chat message: {str(e)}"
         )
-        
-    except Exception as e:
-        logger.error(f"Error listing tools: {e}")
-        raise HTTPException(status_code=500, detail=f"Error listing tools: {str(e)}")
 
-@app.get("/session/{session_id}")
-async def get_session_endpoint(session_id: str, agent: FinancialAgent = Depends(get_agent)):
-    """Get session state and conversation history."""
+@app.get("/api/financial-summary")
+async def get_financial_summary():
+    """Get financial summary directly from the database."""
     try:
-        return {
-            "session_id": session_id,
-            "metrics": agent.get_metrics(),
-            "conversation_length": len(agent.conversation_history)
+        # Import database manager directly
+        from .database.db import get_db_manager
+        
+        db_manager = get_db_manager()
+        
+        # Get total transactions count
+        total_result = db_manager.execute_query(
+            "SELECT COUNT(*) as count FROM transactions",
+            cache_ttl=30
+        )
+        total_transactions = total_result.data[0]['count']
+        
+        # Get date range
+        date_range_result = db_manager.execute_query(
+            "SELECT MIN(transaction_date) as earliest_date, MAX(transaction_date) as latest_date FROM transactions",
+            cache_ttl=300
+        )
+        date_range = date_range_result.data[0]
+        
+        # Get latest balance
+        latest_balance_result = db_manager.execute_query(
+            "SELECT balance FROM transactions ORDER BY transaction_date DESC, transaction_id DESC LIMIT 1",
+            cache_ttl=10
+        )
+        latest_balance = latest_balance_result.data[0]['balance'] if latest_balance_result.data else 0
+        
+        # Get totals
+        totals_result = db_manager.execute_query(
+            "SELECT SUM(debit_amount) as total_debits, SUM(credit_amount) as total_credits FROM transactions WHERE debit_amount IS NOT NULL OR credit_amount IS NOT NULL",
+            cache_ttl=60
+        )
+        totals = totals_result.data[0]
+        
+        # Format amounts as INR currency
+        def format_inr(amount):
+            if amount is None:
+                return "₹0.00"
+            return f"₹{amount:,.2f}"
+        
+        # Prepare summary data
+        summary = {
+            "data": {
+                "total_transactions": total_transactions,
+                "date_range": {
+                    "earliest": date_range['earliest_date'], 
+                    "latest": date_range['latest_date']
+                },
+                "current_balance_inr": format_inr(latest_balance),
+                "current_balance_raw": latest_balance,
+                "total_debits_inr": format_inr(totals['total_debits']) if totals['total_debits'] else "₹0.00",
+                "total_credits_inr": format_inr(totals['total_credits']) if totals['total_credits'] else "₹0.00",
+                "total_debits_raw": totals['total_debits'] or 0,
+                "total_credits_raw": totals['total_credits'] or 0,
+                "performance": {
+                    "queries_executed": 4,
+                    "cache_hits": sum(1 for r in [total_result, date_range_result, latest_balance_result, totals_result] if r.cached),
+                    "total_execution_time": sum(r.execution_time for r in [total_result, date_range_result, latest_balance_result, totals_result])
+                }
+            },
+            "currency": "INR",
+            "generated_at": datetime.now().isoformat(),
+            "server": "direct-database-access"
         }
-    
-    except Exception as e:
-        logger.error(f"Get session error: {e}")
-        raise HTTPException(status_code=500, detail=f"Error retrieving session: {str(e)}")
-
-@app.delete("/session/{session_id}")
-async def clear_session_endpoint(session_id: str, agent: FinancialAgent = Depends(get_agent)):
-    """Clear session conversation history."""
-    try:
-        agent.clear_conversation()
-        logger.info(f"Cleared session {session_id}")
         
-        return {
-            "session_id": session_id, 
-            "status": "cleared",
-            "timestamp": datetime.now().isoformat()
-        }
-    
-    except Exception as e:
-        logger.error(f"Clear session error: {e}")
-        raise HTTPException(status_code=500, detail=f"Error clearing session: {str(e)}")
-
-@app.get("/mcp/health")
-async def mcp_health_endpoint():
-    """Get detailed MCP server health information."""
-    try:
-        if not mcp_manager:
-            raise HTTPException(status_code=503, detail="MCP manager not initialized")
-            
-        health = await mcp_manager.health_check()
-        return health
-        
-    except Exception as e:
-        logger.error(f"MCP health check failed: {e}")
-        raise HTTPException(status_code=500, detail=f"MCP health check failed: {str(e)}")
-
-@app.get("/metrics")
-async def metrics_endpoint():
-    """Get comprehensive performance metrics."""
-    try:
-        metrics = {
-            "timestamp": datetime.now().isoformat(),
-            "application": {
-                "status": "running",
-                "websocket_connections": len(manager.active_connections)
+        # Return the result with proper CORS headers
+        return JSONResponse(
+            content=summary,
+            headers={
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+                "Access-Control-Allow-Headers": "*"
             }
-        }
-        
-        # Agent metrics
-        if financial_agent:
-            metrics["agent"] = financial_agent.get_metrics()
-        
-        # MCP metrics
-        if mcp_manager:
-            mcp_health = await mcp_manager.health_check()
-            metrics["mcp"] = mcp_health
-        
-        return metrics
+        )
         
     except Exception as e:
-        logger.error(f"Error getting metrics: {e}")
-        raise HTTPException(status_code=500, detail=f"Error getting metrics: {str(e)}")
+        logger.error(f"Error getting financial summary: {e}")
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Failed to get financial summary: {str(e)}"
+        )
 
 # WebSocket endpoint for real-time communication
-@app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
-    """WebSocket endpoint for real-time chat interface."""
+@app.websocket("/ws/{session_id}")
+async def websocket_session_endpoint(websocket: WebSocket, session_id: str):
+    """WebSocket endpoint for real-time chat interface with session ID."""
+    logger.info(f"WebSocket connection attempt for session: {session_id}")
     await manager.connect(websocket)
     
     try:
@@ -354,7 +348,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         response_data = {
                             "type": "response",
                             "content": response,
-                            "session_id": financial_agent.session_id,
+                            "session_id": session_id,
                             "processing_time": processing_time,
                             "timestamp": datetime.now().isoformat()
                         }
@@ -402,10 +396,10 @@ async def websocket_endpoint(websocket: WebSocket):
                 
     except WebSocketDisconnect:
         manager.disconnect(websocket)
-        logger.info("WebSocket client disconnected")
+        logger.info(f"WebSocket client disconnected for session: {session_id}")
         
     except Exception as e:
-        logger.error(f"WebSocket error: {e}")
+        logger.error(f"WebSocket error for session {session_id}: {e}")
         manager.disconnect(websocket)
 
 # Error handlers
@@ -437,10 +431,29 @@ async def general_exception_handler(request, exc):
 
 # Development server
 if __name__ == "__main__":
+    # For development, you might want to disable reload to avoid file watching issues
+    # Set reload=False for stable development, or reload=True with proper excludes
     uvicorn.run(
-        "main:app",
+        "backend.main:app",
         host="0.0.0.0",
         port=8000,
         reload=True,
+        reload_dirs=["backend"],  # Only watch the backend directory
+        reload_excludes=[
+            "logs",
+            "*.db",
+            "*.db-*",  # SQLite journal/WAL files
+            "*.log", 
+            "*.sqlite",
+            "*.sqlite3",
+            "__pycache__",
+            "*.pyc",
+            "*.pyo",
+            ".git",
+            "venv",
+            "Bank-Statements",
+            "tests",
+            "frontend"
+        ],
         log_level="info"
     )

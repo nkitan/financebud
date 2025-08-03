@@ -22,7 +22,7 @@ class LLMConfig(BaseModel):
     model: str = "local-model"
     temperature: float = 0.7
     max_tokens: Optional[int] = 2000
-    timeout: int = 60
+    timeout: int = 300
 
 class ServerConfig(BaseModel):
     """Main server configuration."""
@@ -65,7 +65,7 @@ class Config(BaseModel):
         config.mcp_servers = [
             MCPServerConfig(
                 name="financial-data-inr",
-                command="/home/notroot/Work/financebud/.venv/bin/python",
+                command="/home/notroot/Work/financebud/venv/bin/python",
                 args=["/home/notroot/Work/financebud/mcp_server.py"],
                 description="Financial database server for Indian bank statements"
             )

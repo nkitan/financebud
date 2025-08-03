@@ -107,13 +107,13 @@ cp .env.example .env
 # Edit .env with your provider settings
 
 # 3. Start the system
-source .venv/bin/activate
+source venv/bin/activate
 
 # Terminal 1: Start MCP server
 python mcp_server.py
 
 # Terminal 2: Start backend (in new terminal)
-source .venv/bin/activate
+source venv/bin/activate
 python -m backend.main
 
 # 4. Open your browser
@@ -273,8 +273,8 @@ python tests/test_performance.py
 # Clone and setup
 git clone <repository>
 cd financebud
-python -m venv .venv
-source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+python -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
 pip install -r requirements.txt
 
 # Configure environment

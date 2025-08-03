@@ -99,16 +99,27 @@
                         <div class="space-y-3">
                             <div class="flex justify-between">
                                 <span class="text-gray-600">Current Balance</span>
-                                <span class="font-semibold text-green-600" x-text="financialSummary.current_balance_inr"></span>
+                                <span class="font-semibold text-green-600" x-text="financialSummary.data?.current_balance_inr"></span>
                             </div>
                             <div class="flex justify-between">
                                 <span class="text-gray-600">Total Transactions</span>
-                                <span class="font-semibold" x-text="financialSummary.total_transactions?.toLocaleString()"></span>
+                                <span class="font-semibold" x-text="financialSummary.data?.total_transactions?.toLocaleString()"></span>
+                            </div>
+                            <div class="flex justify-between">
+                                <span class="text-gray-600">Total Credits</span>
+                                <span class="font-semibold text-green-600" x-text="financialSummary.data?.total_credits_inr"></span>
+                            </div>
+                            <div class="flex justify-between">
+                                <span class="text-gray-600">Total Debits</span>
+                                <span class="font-semibold text-red-600" x-text="financialSummary.data?.total_debits_inr"></span>
                             </div>
                             <div class="border-t pt-2">
                                 <div class="text-xs text-gray-500">
-                                    <span x-text="financialSummary.date_range?.earliest"></span> - 
-                                    <span x-text="financialSummary.date_range?.latest"></span>
+                                    <span x-text="financialSummary.data?.date_range?.earliest"></span> - 
+                                    <span x-text="financialSummary.data?.date_range?.latest"></span>
+                                </div>
+                                <div class="text-xs text-gray-400 mt-1">
+                                    Server: <span x-text="financialSummary.server"></span>
                                 </div>
                             </div>
                         </div>
@@ -509,28 +520,39 @@
                         if (response.ok) {
                             const data = await response.json();
                             this.financialSummary = data;
+                            console.log('Financial summary loaded:', data);
                         } else {
                             console.error('Failed to load financial summary:', response.status);
                             // Fallback to default values
                             this.financialSummary = {
-                                current_balance_inr: "₹0",
-                                total_transactions: 0,
-                                date_range: {
-                                    earliest: "N/A",
-                                    latest: "N/A"
-                                }
+                                data: {
+                                    current_balance_inr: "₹0",
+                                    total_transactions: 0,
+                                    total_credits_inr: "₹0",
+                                    total_debits_inr: "₹0",
+                                    date_range: {
+                                        earliest: "N/A",
+                                        latest: "N/A"
+                                    }
+                                },
+                                server: "fallback"
                             };
                         }
                     } catch (error) {
                         console.error('Failed to load financial summary:', error);
                         // Fallback to default values
                         this.financialSummary = {
-                            current_balance_inr: "₹0",
-                            total_transactions: 0,
-                            date_range: {
-                                earliest: "N/A",
-                                latest: "N/A"
-                            }
+                            data: {
+                                current_balance_inr: "₹0",
+                                total_transactions: 0,
+                                total_credits_inr: "₹0",
+                                total_debits_inr: "₹0",
+                                date_range: {
+                                    earliest: "N/A",
+                                    latest: "N/A"
+                                }
+                            },
+                            server: "fallback"
                         };
                     }
                 }

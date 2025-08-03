@@ -55,7 +55,7 @@ class MCPServerConfig:
     max_retries: int = 3
     retry_delay: float = 2.0
     health_check_interval: float = 30.0
-    request_timeout: float = 30.0
+    request_timeout: float = 300.0
     auto_reconnect: bool = True
 
 @dataclass
@@ -64,7 +64,7 @@ class ToolCallRequest:
     tool_name: str
     arguments: Dict[str, Any]
     request_id: str
-    timeout: float = 30.0
+    timeout: float = 300.0
     callback: Optional[Callable] = None
 
 class MCPConnection:
@@ -194,6 +194,13 @@ class MCPConnection:
         if "result" not in response or "capabilities" not in response["result"]:
             raise Exception("Invalid initialization response")
         
+        # Send the initialized notification (required by MCP protocol)
+        initialized_notification = {
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized"
+        }
+        await self._send_request_direct(initialized_notification)
+        
         logger.debug(f"MCP server {self.config.name} initialized successfully")
     
     async def _fetch_tools(self):
@@ -201,7 +208,8 @@ class MCPConnection:
         tools_request = {
             "jsonrpc": "2.0",
             "id": self._get_next_id(),
-            "method": "tools/list"
+            "method": "tools/list",
+            "params": {}  # MCP requires params field, even if empty
         }
         
         await self._send_request_direct(tools_request)
@@ -637,7 +645,7 @@ class MCPManager:
                 del self.connections[name]
                 logger.info(f"Removed server: {name}")
     
-    async def call_tool(self, server_name: str, tool_name: str, arguments: Dict[str, Any], timeout: float = 30.0) -> Any:
+    async def call_tool(self, server_name: str, tool_name: str, arguments: Dict[str, Any], timeout: float = 300.0) -> Any:
         """Call a tool on a specific server."""
         if server_name not in self.connections:
             raise Exception(f"Server {server_name} not found")
@@ -653,7 +661,7 @@ class MCPManager:
         # Financial data server configuration
         financial_config = MCPServerConfig(
             name="financial-data-inr",
-            command="/home/notroot/Work/financebud/.venv/bin/python",
+            command="/home/notroot/Work/financebud/venv/bin/python",
             args=["/home/notroot/Work/financebud/mcp_server.py"],
             working_dir="/home/notroot/Work/financebud",
             max_retries=3,

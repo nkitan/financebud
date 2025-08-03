@@ -30,7 +30,7 @@ async def test_ollama_direct():
             async with session.post(
                 chat_url,
                 json=simple_payload,
-                timeout=aiohttp.ClientTimeout(total=30)
+                timeout=aiohttp.ClientTimeout(total=300)
             ) as response:
                 logger.info(f"Response status: {response.status}")
                 logger.info(f"Response headers: {dict(response.headers)}")
@@ -86,7 +86,7 @@ async def test_ollama_with_tools():
             async with session.post(
                 chat_url,
                 json=tools_payload,
-                timeout=aiohttp.ClientTimeout(total=30)
+                timeout=aiohttp.ClientTimeout(total=300)
             ) as response:
                 logger.info(f"Response status: {response.status}")
                 
