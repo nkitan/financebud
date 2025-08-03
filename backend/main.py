@@ -29,12 +29,16 @@ from .agents.llm_providers import LLMConfig, ProviderType, get_default_config
 from .mcp.client import MCPClientManager
 from .config import config
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+# Import centralized logging configuration
+from .logging_config import setup_logging, get_logger_with_context, ContextLogger
+
+# Configure logging with our centralized setup
+setup_logging(
+    log_level=os.getenv("LOG_LEVEL", "INFO"),
+    log_dir=os.getenv("LOG_DIR", "logs")
 )
-logger = logging.getLogger(__name__)
+
+logger: ContextLogger = get_logger_with_context(__name__)  # Type hint for proper method access
 
 # Global instances
 mcp_manager = MCPClientManager()
@@ -264,10 +268,14 @@ async def chat_endpoint(message: ChatMessage, agent: GenericFinancialAgent = Dep
     """Main chat endpoint for financial analysis queries."""
     import time
     start_time = time.time()
+    session_id = "unknown"  # Initialize for error logging
     
     try:
         # Generate session ID if not provided
         session_id = message.session_id or str(uuid.uuid4())
+        
+        # Log the incoming chat request
+        logger.log_chat_request([{"role": "user", "content": message.content}], session_id)
         
         # Get session history before the new message to track tools used
         history_before = agent.get_session_history(session_id)
@@ -300,6 +308,9 @@ async def chat_endpoint(message: ChatMessage, agent: GenericFinancialAgent = Dep
                             if tool_name not in tools_used:
                                 tools_used.append(tool_name)
         
+        # Log the chat response
+        logger.log_chat_response(response, execution_time, session_id, tools_used)
+        
         return ChatResponse(
             response=response,
             session_id=session_id,
@@ -310,7 +321,7 @@ async def chat_endpoint(message: ChatMessage, agent: GenericFinancialAgent = Dep
         )
     
     except Exception as e:
-        logger.error(f"Chat endpoint error: {e}")
+        logger.error(f"Chat endpoint error: {e}", extra={'session_id': session_id}, exc_info=True)
         raise HTTPException(status_code=500, detail=f"Error processing message: {str(e)}")
 
 @app.get("/tools/list")
@@ -404,6 +415,9 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                 context = message_data.get("context", {})
                 
                 if financial_agent and content:
+                    # Log the incoming WebSocket request
+                    logger.log_chat_request([{"role": "user", "content": content}], session_id)
+                    
                     # Process message using the new chat interface
                     import time
                     start_time = time.time()
@@ -416,6 +430,9 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                     if session_id in financial_agent.sessions:
                         # Try to extract tool usage from recent session activity
                         tools_used = ["financial_analysis"]  # Generic tool name
+                    
+                    # Log the WebSocket response
+                    logger.log_chat_response(response, execution_time, session_id, tools_used)
                     
                     result = {
                         "type": "response",
@@ -434,6 +451,8 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                         websocket
                     )
                 else:
+                    logger.warning(f"WebSocket: Agent not available or empty message", 
+                                 extra={'session_id': session_id})
                     await connection_manager.send_personal_message(
                         json.dumps({
                             "type": "error", 
@@ -443,6 +462,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                     )
             
             except json.JSONDecodeError:
+                logger.error(f"WebSocket: Invalid JSON format", extra={'session_id': session_id})
                 await connection_manager.send_personal_message(
                     json.dumps({
                         "type": "error",
@@ -451,7 +471,8 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                     websocket
                 )
             except Exception as e:
-                logger.error(f"WebSocket message processing error: {e}")
+                logger.error(f"WebSocket message processing error: {e}", 
+                           extra={'session_id': session_id}, exc_info=True)
                 await connection_manager.send_personal_message(
                     json.dumps({
                         "type": "error",
@@ -462,9 +483,9 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
     
     except WebSocketDisconnect:
         connection_manager.disconnect(websocket)
-        logger.info(f"WebSocket client disconnected: {session_id}")
+        logger.info(f"WebSocket client disconnected", extra={'session_id': session_id})
     except Exception as e:
-        logger.error(f"WebSocket error: {e}")
+        logger.error(f"WebSocket error: {e}", extra={'session_id': session_id}, exc_info=True)
         connection_manager.disconnect(websocket)
 
 @app.get("/metrics")

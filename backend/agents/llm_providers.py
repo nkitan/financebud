@@ -16,7 +16,10 @@ from typing import Dict, List, Any, Optional
 from dataclasses import dataclass
 from enum import Enum
 
-logger = logging.getLogger(__name__)
+# Import centralized logging
+from ..logging_config import get_logger_with_context
+
+logger = get_logger_with_context(__name__)
 
 class ProviderType(Enum):
     """Supported LLM provider types."""
@@ -81,6 +84,12 @@ class OllamaProvider(LLMProvider):
         tools: Optional[List[Dict[str, Any]]] = None
     ) -> Dict[str, Any]:
         """Send chat completion request to Ollama."""
+        import time
+        start_time = time.time()
+        
+        # Log the chat request
+        logger.log_chat_request(messages, session_id=f"ollama_{self.config.model}")
+        
         payload = {
             "model": self.config.model,
             "messages": messages,
@@ -102,23 +111,69 @@ class OllamaProvider(LLMProvider):
                 ) as response:
                     if response.status == 200:
                         result = await response.json()
+                        execution_time = time.time() - start_time
+                        
+                        # Extract response content for logging
+                        response_content = ""
+                        if 'choices' in result and len(result['choices']) > 0:
+                            choice = result['choices'][0]
+                            if 'message' in choice and 'content' in choice['message']:
+                                response_content = choice['message']['content']
+                        
+                        # Log the successful response
+                        logger.log_chat_response(
+                            response_content,
+                            execution_time=execution_time,
+                            session_id=f"ollama_{self.config.model}"
+                        )
+                        
                         logger.debug(f"Ollama API success: {result}")
                         return result
                     else:
+                        execution_time = time.time() - start_time
                         error_text = await response.text()
                         error_msg = f"Ollama returned status {response.status}: {error_text}"
+                        
+                        # Log the error response
+                        logger.log_chat_response(
+                            f"ERROR: {error_msg}",
+                            execution_time=execution_time,
+                            session_id=f"ollama_{self.config.model}",
+                            level=logging.ERROR
+                        )
                         logger.error(error_msg)
                         raise Exception(error_msg)
         except asyncio.TimeoutError as e:
+            execution_time = time.time() - start_time
             error_msg = f"Ollama API timeout after {self.config.timeout}s"
+            logger.log_chat_response(
+                f"ERROR: {error_msg}",
+                execution_time=execution_time,
+                session_id=f"ollama_{self.config.model}",
+                level=logging.ERROR
+            )
             logger.error(error_msg)
             return self._error_response(error_msg)
         except aiohttp.ClientError as e:
+            execution_time = time.time() - start_time
             error_msg = f"Ollama API client error: {str(e)}"
+            logger.log_chat_response(
+                f"ERROR: {error_msg}",
+                execution_time=execution_time,
+                session_id=f"ollama_{self.config.model}",
+                level=logging.ERROR
+            )
             logger.error(error_msg)
             return self._error_response(error_msg)
         except Exception as e:
+            execution_time = time.time() - start_time
             error_msg = f"Ollama API unexpected error: {type(e).__name__}: {str(e)}"
+            logger.log_chat_response(
+                f"ERROR: {error_msg}",
+                execution_time=execution_time,
+                session_id=f"ollama_{self.config.model}",
+                level=logging.ERROR
+            )
             logger.error(error_msg)
             return self._error_response(error_msg)
     

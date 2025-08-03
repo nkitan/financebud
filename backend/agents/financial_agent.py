@@ -30,7 +30,10 @@ from .llm_providers import (
 # FastMCP client for proper MCP protocol handling
 from fastmcp import Client as FastMCPClient
 
-logger = logging.getLogger(__name__)
+# Import centralized logging
+from ..logging_config import get_logger_with_context
+
+logger = get_logger_with_context(__name__)
 
 class ToolCallResult(BaseModel):
     """Result of a tool call."""
@@ -91,6 +94,35 @@ async def get_account_summary_tool(tool_input: str) -> str:
     except Exception as e:
         logger.error(f"Error getting account summary: {e}")
         return f"Error getting account summary: {str(e)}"
+
+async def get_recent_transactions_tool(tool_input: str) -> str:
+    """Get the most recent N transactions."""
+    try:
+        client = FastMCPClient("mcp_server.py")
+        
+        # Parse limit from input
+        limit = 10  # Default
+        if tool_input.strip().isdigit():
+            limit = int(tool_input.strip())
+        elif "limit:" in tool_input:
+            try:
+                limit_str = tool_input.split("limit:")[1].split()[0]
+                limit = int(limit_str)
+            except (IndexError, ValueError):
+                pass
+        
+        params = {"limit": limit}
+        async with client:
+            result = await client.call_tool("get_recent_transactions", params)
+            # Extract text content from FastMCP CallToolResult
+            if hasattr(result, 'content') and result.content:
+                for content_item in result.content:
+                    if hasattr(content_item, 'type') and content_item.type == 'text':
+                        return getattr(content_item, 'text', str(content_item))
+            return str(result)
+    except Exception as e:
+        logger.error(f"Error getting recent transactions: {e}")
+        return f"Error getting recent transactions: {str(e)}"
 
 async def search_transactions_tool(tool_input: str) -> str:
     """Search for transactions matching a pattern."""
@@ -227,6 +259,7 @@ class GenericFinancialAgent:
         # Initialize financial tools
         self.tools = [
             FinancialTool("get_account_summary", "Get account summary with current balance and transaction overview", get_account_summary_tool),
+            FinancialTool("get_recent_transactions", "Get the most recent N transactions (default 10)", get_recent_transactions_tool),
             FinancialTool("search_transactions", "Search for transactions matching a pattern or description", search_transactions_tool),
             FinancialTool("get_transactions_by_date_range", "Get transactions within a specific date range", get_transactions_by_date_range_tool),
             FinancialTool("get_monthly_summary", "Get monthly summary of spending and transactions", get_monthly_summary_tool),
@@ -266,6 +299,7 @@ Guidelines for responses:
 
 Tool Usage:
 - For account balances/summaries: use get_account_summary tool
+- For recent transactions: use get_recent_transactions tool (default 10, specify limit if needed)
 - For transaction searches: use search_transactions tool  
 - For monthly analysis: use get_monthly_summary tool
 - For trends over time: use analyze_spending_trends tool
@@ -352,6 +386,7 @@ REMEMBER: Always call the appropriate tool first to get current data, then provi
         # Keywords to tool mapping
         tool_keywords = {
             "get_account_summary": ["balance", "summary", "account", "overview"],
+            "get_recent_transactions": ["recent", "latest", "last", "transactions", "show me"],
             "search_transactions": ["search", "find", "transaction", "payment"],
             "get_transactions_by_date_range": ["date", "range", "between", "from", "to", "period"],
             "get_monthly_summary": ["month", "monthly", "spending"],
@@ -361,7 +396,7 @@ REMEMBER: Always call the appropriate tool first to get current data, then provi
         
         # If query is short or general, return only the most common tools
         if len(user_query.split()) <= 3:
-            primary_tools = ["get_account_summary", "search_transactions"]
+            primary_tools = ["get_account_summary", "get_recent_transactions", "search_transactions"]
             return [tool for tool in all_tools if tool["function"]["name"] in primary_tools]
         
         # Select tools based on keywords
@@ -372,7 +407,7 @@ REMEMBER: Always call the appropriate tool first to get current data, then provi
         
         # If no specific tools matched, return the most common ones
         if not selected_tool_names:
-            selected_tool_names = {"get_account_summary", "search_transactions"}
+            selected_tool_names = {"get_account_summary", "get_recent_transactions", "search_transactions"}
         
         # Limit to maximum 3 tools to avoid overwhelming Ollama
         selected_tool_names = list(selected_tool_names)[:3]

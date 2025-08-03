@@ -86,6 +86,31 @@ def search_transactions(description_pattern: str, limit: int = 50) -> str:
         return f"Error searching transactions: {str(e)}"
 
 @mcp.tool()
+def get_recent_transactions(limit: int = 10) -> str:
+    """Get the most recent N transactions. All amounts in INR."""
+    try:
+        query = "SELECT transaction_date, description, debit_amount, credit_amount, balance FROM transactions ORDER BY transaction_date DESC, transaction_id DESC LIMIT ?"
+        results = execute_query(query, (limit,))
+        
+        if not results:
+            return "No transactions found in the database."
+        
+        # Add formatted INR amounts
+        for result in results:
+            result['debit_amount_inr'] = format_inr(result['debit_amount']) if result['debit_amount'] else None
+            result['credit_amount_inr'] = format_inr(result['credit_amount']) if result['credit_amount'] else None
+            result['balance_inr'] = format_inr(result['balance'])
+        
+        return json.dumps({
+            "total_transactions": len(results),
+            "limit_requested": limit,
+            "currency": "INR",
+            "transactions": results
+        }, indent=2)
+    except Exception as e:
+        return f"Error getting recent transactions: {str(e)}"
+
+@mcp.tool()
 def get_transactions_by_date_range(start_date: str, end_date: str, limit: int = 100) -> str:
     """Get transactions within a specific date range (YYYY-MM-DD format). All amounts in INR."""
     try:

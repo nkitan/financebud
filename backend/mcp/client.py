@@ -17,7 +17,10 @@ from typing import Dict, List, Any, Optional, Tuple, Union
 from datetime import datetime, timedelta
 from pathlib import Path
 
-logger = logging.getLogger(__name__)
+# Import centralized logging
+from ..logging_config import get_logger_with_context
+
+logger = get_logger_with_context(__name__)
 
 class MCPServerConnection:
     """Represents a robust connection to a single MCP server."""
@@ -270,8 +273,13 @@ class MCPServerConnection:
     
     async def call_tool(self, tool_name: str, arguments: Dict[str, Any]) -> Any:
         """Call a specific tool on this MCP server."""
+        start_time = time.time()
+        
         if self.status != "connected":
             raise Exception(f"Server {self.name} is not connected")
+        
+        # Log the tool call
+        logger.log_tool_call(tool_name, arguments, session_id=f"{self.name}")
         
         # Try different tool call formats
         tool_requests = [
@@ -309,8 +317,20 @@ class MCPServerConnection:
                 response = await self._read_response()
                 
                 if "error" not in response:
+                    execution_time = time.time() - start_time
+                    result = response.get("result", {})
+                    
+                    # Log successful tool call
+                    logger.log_tool_call(
+                        tool_name, 
+                        arguments, 
+                        result=result, 
+                        execution_time=execution_time,
+                        session_id=f"{self.name}",
+                        level=logging.DEBUG
+                    )
                     logger.debug(f"Tool call successful using format {i+1}")
-                    return response.get("result", {})
+                    return result
                 else:
                     logger.debug(f"Tool call format {i+1} failed: {response['error']}")
                     
@@ -318,8 +338,18 @@ class MCPServerConnection:
                 logger.debug(f"Tool call format {i+1} exception: {e}")
                 continue
         
-        # If all formats failed
-        raise Exception(f"All tool call formats failed for {tool_name}")
+        # If all formats failed, log the error
+        execution_time = time.time() - start_time
+        error_msg = f"All tool call formats failed for {tool_name}"
+        logger.log_tool_call(
+            tool_name, 
+            arguments, 
+            result=f"ERROR: {error_msg}", 
+            execution_time=execution_time,
+            session_id=f"{self.name}",
+            level=logging.ERROR
+        )
+        raise Exception(error_msg)
     
     async def disconnect(self):
         """Disconnect from the MCP server."""
