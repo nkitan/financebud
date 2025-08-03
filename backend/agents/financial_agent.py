@@ -237,7 +237,7 @@ class GenericFinancialAgent:
         self.tool_map = {tool.name: tool.func for tool in self.tools}
         self.sessions: Dict[str, List[ConversationMessage]] = {}
         
-                # System prompt for financial analysis
+        # System prompt for financial analysis
         self.system_prompt = f"""You are an expert financial analysis assistant with access to real banking and transaction data from Indian bank accounts.
 
 Current LLM Provider: {self.config.provider.value} ({self.config.model})
@@ -250,7 +250,12 @@ Your capabilities include:
 - Recurring payment identification and analysis
 - Custom financial queries and detailed analytics
 
-IMPORTANT: You have access to specialized financial tools. ALWAYS use these tools to get real data. Never attempt to write Python code or simulate data.
+CRITICAL INSTRUCTIONS:
+1. ALWAYS use the specialized financial tools to get real data
+2. NEVER make up or hallucinate financial data
+3. When you receive "Tool result:" messages, use ONLY that data in your response
+4. Base your analysis exclusively on the actual tool results provided
+5. If tool results contain JSON data, parse and present it in a user-friendly format
 
 Guidelines for responses:
 - Always format monetary amounts in Indian Rupees (₹) with proper comma separation
@@ -267,7 +272,7 @@ Tool Usage:
 - For UPI analysis: use get_upi_transaction_analysis tool
 - For date ranges: use get_transactions_by_date_range tool
 
-Always call the appropriate tool first to get current data, then provide analysis and insights based on the real data."""
+REMEMBER: Always call the appropriate tool first to get current data, then provide analysis and insights based ONLY on the real data returned by the tools."""
 
     async def test_connection(self) -> bool:
         """Test if the LLM provider is available."""
@@ -386,27 +391,29 @@ Always call the appropriate tool first to get current data, then provide analysi
         
         # Always include system message
         system_msg = None
-        user_assistant_pairs = []
+        conversation_messages = []
         
         for msg in self.sessions[session_id]:
             if msg.role == "system":
                 system_msg = {"role": "system", "content": msg.content}
             elif msg.role == "user":
-                user_assistant_pairs.append({"role": "user", "content": msg.content})
-            elif msg.role == "assistant" and not msg.tool_calls:
-                # Only include assistant messages that are final responses, not tool calls
-                if user_assistant_pairs and len(user_assistant_pairs) > 0:
-                    user_assistant_pairs.append({"role": "assistant", "content": msg.content})
-            # Skip tool call messages and tool response messages to avoid confusing the model
+                conversation_messages.append({"role": "user", "content": msg.content})
+            elif msg.role == "assistant":
+                # Include assistant messages regardless of tool calls
+                conversation_messages.append({"role": "assistant", "content": msg.content or ""})
+            elif msg.role == "tool":
+                # Include tool results as user messages for better LLM understanding
+                tool_content = f"Tool result: {msg.content}"
+                conversation_messages.append({"role": "user", "content": tool_content})
         
-        # Build clean message history
+        # Build message history
         if system_msg:
             messages.append(system_msg)
         
-        # Only include the last few user-assistant pairs to keep context manageable
-        # This prevents the model from getting confused by complex tool calling history
-        recent_pairs = user_assistant_pairs[-6:]  # Last 3 user-assistant pairs
-        messages.extend(recent_pairs)
+        # Include recent conversation to maintain context
+        # Keep more messages to ensure tool results are included
+        recent_messages = conversation_messages[-10:]  # Last 10 messages
+        messages.extend(recent_messages)
         
         return messages
 
