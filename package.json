@@ -1,15 +1,40 @@
 {
-  "name": "financebud-ui",
-  "version": "1.0.0",
-  "description": "Financial Data Analysis UI with LangGraph Agent Support",
+  "name": "financebud",
+  "version": "3.0.0",
+  "description": "High-Performance AI Financial Analysis Platform with Multi-Provider LLM Support",
   "scripts": {
     "dev": "python -m uvicorn backend.main:app --reload --host 0.0.0.0 --port 8000",
     "start": "python -m uvicorn backend.main:app --host 0.0.0.0 --port 8000",
-    "test": "pytest tests/",
+    "test": "python tests/test_production.py",
+    "test-providers": "python tests/test_providers.py",
+    "test-tools": "python tests/test_tool_support.py",
     "format": "black . && isort .",
-    "install": "pip install -r requirements.txt"
+    "install": "pip install -r requirements.txt",
+    "setup": "./setup_multi_provider.sh",
+    "mcp": "python mcp_server.py",
+    "health": "curl http://localhost:8000/health"
   },
-  "keywords": ["finance", "banking", "mcp", "langgraph", "ai", "agents"],
+  "keywords": [
+    "finance", 
+    "banking", 
+    "mcp", 
+    "ai", 
+    "agents", 
+    "fastapi", 
+    "performance",
+    "llm",
+    "multi-provider",
+    "indian-banking",
+    "upi"
+  ],
   "author": "FinanceBud Team",
-  "license": "MIT"
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/nkitan/financebud"
+  },
+  "bugs": {
+    "url": "https://github.com/nkitan/financebud/issues"
+  },
+  "homepage": "https://github.com/nkitan/financebud#readme"
 }

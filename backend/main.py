@@ -2,9 +2,16 @@
 FinanceBud Backend API
 ====================
 
-Production-ready FastAPI backend that integrates financial agents with MCP servers 
-for comprehensive financial analysis. Features robust error handling, WebSocket support,
-and comprehensive monitoring capabilities. Now supports multiple LLM providers!
+High-performance FastAPI backend with integrated financial agents and MCP servers 
+for comprehensive financial analysis. Features persistent connections, connection pooling,
+advanced caching, and optimized database operations.
+
+Key Performance Features:
+- Persistent MCP connections with health monitoring
+- Database connection pooling with optimized SQLite configuration
+- LRU caching with TTL for query results
+- Parallel tool call processing
+- WebSocket support for real-time updates
 """
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Depends
@@ -20,160 +27,105 @@ import uuid
 from datetime import datetime
 import uvicorn
 import os
-import sqlite3
 from contextlib import asynccontextmanager
 
-# Import new generic agent instead of LM Studio specific one
-from .agents.optimized_financial_agent import OptimizedFinancialAgent, get_optimized_financial_agent
+# Import high-performance components
+from .agents.financial_agent import FinancialAgent, get_financial_agent
 from .agents.llm_providers import LLMConfig, ProviderType, get_default_config
-from .mcp.persistent_client import PersistentMCPManager, get_persistent_mcp_manager
+from .mcp.client import MCPManager, get_mcp_manager
 from .config import config
 
 # Import centralized logging configuration
 from .logging_config import setup_logging, get_logger_with_context, ContextLogger
 
-# Configure logging with our centralized setup
+# Configure logging with optimized settings
 setup_logging(
     log_level=os.getenv("LOG_LEVEL", "INFO"),
     log_dir=os.getenv("LOG_DIR", "logs")
 )
 
-logger: ContextLogger = get_logger_with_context(__name__)  # Type hint for proper method access
+logger: ContextLogger = get_logger_with_context(__name__)
 
-# Global instances
-# mcp_manager = MCPClientManager()  # Replaced with persistent manager
-financial_agent = None
-persistent_mcp_manager = None
+# Global application state
+financial_agent: Optional[FinancialAgent] = None
+mcp_manager: Optional[MCPManager] = None
 
-# Pydantic models for API
+# API Models
 class ChatMessage(BaseModel):
     content: str
     session_id: Optional[str] = None
-    context: Optional[Dict[str, Any]] = None
 
 class ChatResponse(BaseModel):
     response: str
     session_id: str
-    agent_state: Dict[str, Any]
-    tools_used: List[str]
-    execution_time: float
-    metadata: Dict[str, Any]
+    processing_time: float
+    tool_calls: List[str] = []
 
-class ServerStatus(BaseModel):
+class HealthResponse(BaseModel):
     status: str
-    servers: Dict[str, Any]
-    agent_available: bool
-    lm_studio_available: bool
+    mcp_health: Dict[str, Any]
+    agent_status: str
+    performance_metrics: Dict[str, Any]
 
-class ToolCall(BaseModel):
-    server_name: str
-    tool_name: str
-    arguments: Dict[str, Any] = Field(default_factory=dict)
+class ToolListResponse(BaseModel):
+    tools: List[Dict[str, Any]]
+    server_count: int
 
-class FinancialSummary(BaseModel):
-    current_balance_inr: str
-    total_transactions: int
-    date_range: Dict[str, str]
-    last_updated: str
-
+# Connection manager for WebSocket connections
 class ConnectionManager:
-    """Manages WebSocket connections for real-time communication."""
-    
     def __init__(self):
         self.active_connections: List[WebSocket] = []
-        self.connection_sessions: Dict[WebSocket, str] = {}
-    
-    async def connect(self, websocket: WebSocket, session_id: str):
+
+    async def connect(self, websocket: WebSocket):
         await websocket.accept()
         self.active_connections.append(websocket)
-        self.connection_sessions[websocket] = session_id
-        logger.info(f"WebSocket connected for session: {session_id}")
-    
+        logger.info("New WebSocket connection established")
+
     def disconnect(self, websocket: WebSocket):
         if websocket in self.active_connections:
             self.active_connections.remove(websocket)
-        if websocket in self.connection_sessions:
-            session_id = self.connection_sessions[websocket]
-            del self.connection_sessions[websocket]
-            logger.info(f"WebSocket disconnected for session: {session_id}")
-    
+        logger.info("WebSocket connection closed")
+
     async def send_personal_message(self, message: str, websocket: WebSocket):
-        await websocket.send_text(message)
-    
+        try:
+            await websocket.send_text(message)
+        except Exception as e:
+            logger.error(f"Failed to send WebSocket message: {e}")
+            self.disconnect(websocket)
+
     async def broadcast(self, message: str):
+        disconnected = []
         for connection in self.active_connections:
             try:
                 await connection.send_text(message)
             except Exception as e:
-                logger.error(f"Error broadcasting message: {e}")
+                logger.error(f"Failed to broadcast to connection: {e}")
+                disconnected.append(connection)
+        
+        # Clean up disconnected connections
+        for connection in disconnected:
+            self.disconnect(connection)
 
-connection_manager = ConnectionManager()
-
-def get_financial_summary_from_db() -> FinancialSummary:
-    """Get financial summary directly from the database."""
-    try:
-        db_path = config.database.path
-        conn = sqlite3.connect(db_path)
-        cursor = conn.cursor()
-        
-        # Get summary statistics with current balance from the latest transaction
-        cursor.execute("""
-            SELECT 
-                COUNT(*) as total_transactions,
-                (SELECT balance FROM transactions 
-                 ORDER BY transaction_date DESC, transaction_id DESC 
-                 LIMIT 1) as current_balance,
-                MIN(transaction_date) as earliest_date,
-                MAX(transaction_date) as latest_date
-            FROM transactions
-        """)
-        
-        result = cursor.fetchone()
-        conn.close()
-        
-        if result:
-            total_transactions, current_balance, earliest_date, latest_date = result
-            return FinancialSummary(
-                current_balance_inr=f"₹{current_balance:,.2f}" if current_balance else "₹0",
-                total_transactions=int(total_transactions) if total_transactions else 0,
-                date_range={
-                    "earliest": earliest_date or "N/A",
-                    "latest": latest_date or "N/A"
-                },
-                last_updated=datetime.now().isoformat()
-            )
-        else:
-            return FinancialSummary(
-                current_balance_inr="₹0",
-                total_transactions=0,
-                date_range={"earliest": "N/A", "latest": "N/A"},
-                last_updated=datetime.now().isoformat()
-            )
-    except Exception as e:
-        logger.error(f"Error getting financial summary from database: {e}")
-        return FinancialSummary(
-            current_balance_inr="₹0",
-            total_transactions=0,
-            date_range={"earliest": "N/A", "latest": "N/A"},
-            last_updated=datetime.now().isoformat()
-        )
+manager = ConnectionManager()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Manage application lifespan events."""
-    global financial_agent
+    """Manage application lifespan with optimized startup and shutdown."""
+    global financial_agent, mcp_manager
     
     # Startup
-    logger.info("🚀 Starting FinanceBud backend...")
+    logger.info("🚀 Starting FinanceBud backend with performance optimizations...")
     
     try:
-        # Initialize MCP servers
+        # Initialize high-performance MCP manager
+        mcp_manager = await get_mcp_manager()
         await mcp_manager.initialize_default_servers()
         
-        # Initialize the financial agent with default config
-        financial_agent = await get_optimized_financial_agent()
+        # Initialize financial agent
+        financial_agent = await get_financial_agent()
         
-        logger.info(f"✅ Backend started successfully with {financial_agent.config.provider.value} provider!")
+        logger.info(f"✅ Backend started successfully with {financial_agent.llm_config.provider.value} provider!")
+        logger.info("🔥 Performance features enabled: persistent connections, connection pooling, caching")
     except Exception as e:
         logger.error(f"❌ Failed to start backend: {e}")
         raise
@@ -183,20 +135,23 @@ async def lifespan(app: FastAPI):
     # Shutdown
     logger.info("🛑 Shutting down FinanceBud backend...")
     try:
-        await mcp_manager.close_all()
+        if mcp_manager:
+            await mcp_manager.shutdown()
         logger.info("✅ Backend shutdown completed")
     except Exception as e:
         logger.error(f"❌ Error during shutdown: {e}")
 
-# Initialize FastAPI app with lifespan
+# Initialize FastAPI app with optimized configuration
 app = FastAPI(
     title="FinanceBud API",
-    description="Production-Ready Financial Analysis Backend with LangGraph Agents and MCP Integration",
-    version="2.0.0",
-    lifespan=lifespan
+    description="High-Performance Financial Analysis Backend with AI Agents and MCP Integration",
+    version="3.0.0",
+    lifespan=lifespan,
+    docs_url="/docs",
+    redoc_url="/redoc"
 )
 
-# Add CORS middleware
+# Add CORS middleware with optimized settings
 app.add_middleware(
     CORSMiddleware,
     allow_origins=config.server.cors_origins,
@@ -205,341 +160,287 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Static files (for serving the frontend)
+# Static files for serving the frontend
 frontend_path = os.path.join(os.path.dirname(__file__), "..", "frontend")
 if os.path.exists(frontend_path):
     app.mount("/static", StaticFiles(directory=frontend_path), name="static")
 
 # Dependency to ensure agent is available
-async def get_agent() -> GenericFinancialAgent:
+async def get_agent() -> FinancialAgent:
     if financial_agent is None:
         raise HTTPException(status_code=503, detail="Financial agent not initialized")
     return financial_agent
 
 # Routes
 @app.get("/")
-async def root():
-    """Serve the main frontend page or API info."""
+async def serve_frontend():
+    """Serve the main frontend application."""
     frontend_file = os.path.join(frontend_path, "index.html")
     if os.path.exists(frontend_file):
         return FileResponse(frontend_file)
-    return {
-        "message": "FinanceBud API is running!",
-        "status": "healthy",
-        "version": "2.0.0",
-        "docs": "/docs"
-    }
+    return {"message": "FinanceBud API", "version": "3.0.0", "status": "running"}
 
-@app.get("/health", response_model=ServerStatus)
+@app.get("/health", response_model=HealthResponse)
 async def health_check():
-    """Comprehensive health check endpoint."""
+    """Comprehensive health check with performance metrics."""
     try:
-        # Check MCP servers
-        mcp_health = await mcp_manager.health_check()
+        # MCP health check
+        mcp_health = {}
+        if mcp_manager:
+            mcp_health = await mcp_manager.health_check()
         
-        # Check agent
-        agent_health = {}
+        # Agent performance metrics
+        agent_metrics = {}
         if financial_agent:
-            agent_health = await financial_agent.get_health()
+            agent_metrics = financial_agent.get_metrics()
         
-        return ServerStatus(
-            status="healthy" if mcp_health.get("connected_servers", 0) > 0 else "degraded",
-            servers=mcp_health,
-            agent_available=financial_agent is not None,
-            lm_studio_available=agent_health.get("provider_available", False)
+        return HealthResponse(
+            status="healthy",
+            mcp_health=mcp_health,
+            agent_status="ready" if financial_agent else "not_initialized",
+            performance_metrics={
+                "agent_metrics": agent_metrics,
+                "websocket_connections": len(manager.active_connections),
+                "mcp_servers": len(mcp_health.get("servers", {}))
+            }
         )
     except Exception as e:
         logger.error(f"Health check failed: {e}")
-        return ServerStatus(
-            status="unhealthy",
-            servers={},
-            agent_available=False,
-            lm_studio_available=False
-        )
+        raise HTTPException(status_code=500, detail=f"Health check failed: {str(e)}")
 
-@app.get("/api/financial-summary", response_model=FinancialSummary)
-async def get_financial_summary():
-    """Get financial summary directly from the database."""
-    return get_financial_summary_from_db()
-
-# API Routes - grouped under /api prefix for consistency
 @app.post("/chat", response_model=ChatResponse)
-@app.post("/api/chat", response_model=ChatResponse)
-async def chat_endpoint(message: ChatMessage, agent: GenericFinancialAgent = Depends(get_agent)):
-    """Main chat endpoint for financial analysis queries."""
-    import time
-    start_time = time.time()
-    session_id = "unknown"  # Initialize for error logging
+async def chat_endpoint(message: ChatMessage, agent: FinancialAgent = Depends(get_agent)):
+    """Process chat messages with performance tracking."""
+    start_time = datetime.now()
     
     try:
-        # Generate session ID if not provided
-        session_id = message.session_id or str(uuid.uuid4())
+        logger.info(f"Processing chat message: {message.content[:100]}...")
         
-        # Log the incoming chat request
-        logger.log_chat_request([{"role": "user", "content": message.content}], session_id)
+        # Process message with the agent
+        response = await agent.process_message(message.content)
         
-        # Get session history before the new message to track tools used
-        history_before = agent.get_session_history(session_id)
-        messages_before = len(history_before)
+        processing_time = (datetime.now() - start_time).total_seconds()
         
-        # Process the message using the new chat interface
-        response = await agent.chat(message.content, session_id)
-        
-        # Calculate execution time
-        execution_time = time.time() - start_time
-        
-        # Get session history after to track which tools were used
-        history_after = agent.get_session_history(session_id)
-        
-        # Extract tools used from the session history
-        tools_used = []
-        for msg in history_after[messages_before:]:
-            if msg["role"] == "tool":
-                # Try to extract tool name from the conversation context
-                tools_used.append("financial_tool")  # Generic for now
-        
-        # If we can access the agent's session directly, get more specific tool names
-        if session_id in agent.sessions:
-            session_msgs = agent.sessions[session_id]
-            for msg in session_msgs:
-                if hasattr(msg, 'tool_calls') and msg.tool_calls:
-                    for tool_call in msg.tool_calls:
-                        if 'function' in tool_call and 'name' in tool_call['function']:
-                            tool_name = tool_call['function']['name']
-                            if tool_name not in tools_used:
-                                tools_used.append(tool_name)
-        
-        # Log the chat response
-        logger.log_chat_response(response, execution_time, session_id, tools_used)
+        logger.info(f"Chat processed in {processing_time:.3f}s")
         
         return ChatResponse(
             response=response,
-            session_id=session_id,
-            agent_state={"provider": agent.config.provider.value, "model": agent.config.model},
-            tools_used=tools_used,
-            execution_time=execution_time,
-            metadata={"messages_in_session": len(history_after)}
+            session_id=agent.session_id,
+            processing_time=processing_time,
+            tool_calls=[]  # Could be extracted from agent if needed
         )
-    
+        
     except Exception as e:
-        logger.error(f"Chat endpoint error: {e}", extra={'session_id': session_id}, exc_info=True)
+        processing_time = (datetime.now() - start_time).total_seconds()
+        logger.error(f"Chat error: {e} (processing time: {processing_time:.3f}s)")
         raise HTTPException(status_code=500, detail=f"Error processing message: {str(e)}")
 
-@app.get("/tools/list")
-async def list_tools_endpoint(agent: GenericFinancialAgent = Depends(get_agent)):
-    """List all available MCP tools."""
+@app.get("/tools", response_model=ToolListResponse)
+async def list_tools_endpoint(agent: FinancialAgent = Depends(get_agent)):
+    """List all available financial analysis tools."""
     try:
-        # Return the financial tools available in the agent
-        tools = [
-            {
-                "name": tool.name,
-                "description": tool.description
-            }
-            for tool in agent.tools
-        ]
-        return {"tools": tools, "count": len(tools)}
-    
+        tools = agent.get_openai_tools()
+        
+        # Get MCP server information
+        server_count = 0
+        if mcp_manager:
+            servers = await mcp_manager.get_all_tools()
+            server_count = len(servers)
+        
+        return ToolListResponse(
+            tools=tools,
+            server_count=server_count
+        )
+        
     except Exception as e:
-        logger.error(f"List tools error: {e}")
+        logger.error(f"Error listing tools: {e}")
         raise HTTPException(status_code=500, detail=f"Error listing tools: {str(e)}")
 
-@app.get("/sessions/{session_id}")
-async def get_session_endpoint(session_id: str, agent: GenericFinancialAgent = Depends(get_agent)):
+@app.get("/session/{session_id}")
+async def get_session_endpoint(session_id: str, agent: FinancialAgent = Depends(get_agent)):
     """Get session state and conversation history."""
     try:
-        history = agent.get_session_history(session_id)
-        if not history:
-            raise HTTPException(status_code=404, detail="Session not found")
-        
         return {
             "session_id": session_id,
-            "history": history,
-            "message_count": len(history)
+            "metrics": agent.get_metrics(),
+            "conversation_length": len(agent.conversation_history)
         }
     
-    except HTTPException:
-        raise
     except Exception as e:
         logger.error(f"Get session error: {e}")
         raise HTTPException(status_code=500, detail=f"Error retrieving session: {str(e)}")
 
-@app.delete("/sessions/{session_id}")
-async def clear_session_endpoint(session_id: str, agent: GenericFinancialAgent = Depends(get_agent)):
-    """Clear a specific session."""
+@app.delete("/session/{session_id}")
+async def clear_session_endpoint(session_id: str, agent: FinancialAgent = Depends(get_agent)):
+    """Clear session conversation history."""
     try:
-        # Clear session by removing it from the agent's sessions
-        if session_id in agent.sessions:
-            del agent.sessions[session_id]
-        return {"message": f"Session {session_id} cleared successfully"}
+        agent.clear_conversation()
+        logger.info(f"Cleared session {session_id}")
+        
+        return {
+            "session_id": session_id, 
+            "status": "cleared",
+            "timestamp": datetime.now().isoformat()
+        }
     
     except Exception as e:
         logger.error(f"Clear session error: {e}")
         raise HTTPException(status_code=500, detail=f"Error clearing session: {str(e)}")
 
-@app.get("/servers")
-async def list_servers_endpoint():
-    """List all MCP servers and their status."""
+@app.get("/mcp/health")
+async def mcp_health_endpoint():
+    """Get detailed MCP server health information."""
     try:
+        if not mcp_manager:
+            raise HTTPException(status_code=503, detail="MCP manager not initialized")
+            
         health = await mcp_manager.health_check()
         return health
-    
+        
     except Exception as e:
-        logger.error(f"List servers error: {e}")
-        raise HTTPException(status_code=500, detail=f"Error listing servers: {str(e)}")
-
-@app.post("/servers/{server_name}/reconnect")
-async def reconnect_server_endpoint(server_name: str):
-    """Reconnect to a specific MCP server."""
-    try:
-        success = await mcp_manager.reconnect_server(server_name)
-        return {
-            "server_name": server_name,
-            "reconnected": success,
-            "message": "Reconnection successful" if success else "Reconnection failed"
-        }
-    
-    except Exception as e:
-        logger.error(f"Reconnect server error: {e}")
-        raise HTTPException(status_code=500, detail=f"Error reconnecting server: {str(e)}")
-
-@app.websocket("/ws/{session_id}")
-async def websocket_endpoint(websocket: WebSocket, session_id: str):
-    """WebSocket endpoint for real-time chat."""
-    await connection_manager.connect(websocket, session_id)
-    
-    try:
-        while True:
-            data = await websocket.receive_text()
-            try:
-                message_data = json.loads(data)
-                content = message_data.get("content", "")
-                context = message_data.get("context", {})
-                
-                if financial_agent and content:
-                    # Log the incoming WebSocket request
-                    logger.log_chat_request([{"role": "user", "content": content}], session_id)
-                    
-                    # Process message using the new chat interface
-                    import time
-                    start_time = time.time()
-                    
-                    response = await financial_agent.chat(content, session_id)
-                    execution_time = time.time() - start_time
-                    
-                    # Get basic tools used information
-                    tools_used = []
-                    if session_id in financial_agent.sessions:
-                        # Try to extract tool usage from recent session activity
-                        tools_used = ["financial_analysis"]  # Generic tool name
-                    
-                    # Log the WebSocket response
-                    logger.log_chat_response(response, execution_time, session_id, tools_used)
-                    
-                    result = {
-                        "type": "response",
-                        "data": {
-                            "response": response,
-                            "session_id": session_id,
-                            "agent_state": {"provider": financial_agent.config.provider.value},
-                            "tools_used": tools_used,
-                            "execution_time": execution_time
-                        }
-                    }
-                    
-                    # Send response
-                    await connection_manager.send_personal_message(
-                        json.dumps(result),
-                        websocket
-                    )
-                else:
-                    logger.warning(f"WebSocket: Agent not available or empty message", 
-                                 extra={'session_id': session_id})
-                    await connection_manager.send_personal_message(
-                        json.dumps({
-                            "type": "error", 
-                            "error": "Agent not available or empty message"
-                        }),
-                        websocket
-                    )
-            
-            except json.JSONDecodeError:
-                logger.error(f"WebSocket: Invalid JSON format", extra={'session_id': session_id})
-                await connection_manager.send_personal_message(
-                    json.dumps({
-                        "type": "error",
-                        "error": "Invalid JSON format"
-                    }),
-                    websocket
-                )
-            except Exception as e:
-                logger.error(f"WebSocket message processing error: {e}", 
-                           extra={'session_id': session_id}, exc_info=True)
-                await connection_manager.send_personal_message(
-                    json.dumps({
-                        "type": "error",
-                        "error": f"Error processing message: {str(e)}"
-                    }),
-                    websocket
-                )
-    
-    except WebSocketDisconnect:
-        connection_manager.disconnect(websocket)
-        logger.info(f"WebSocket client disconnected", extra={'session_id': session_id})
-    except Exception as e:
-        logger.error(f"WebSocket error: {e}", extra={'session_id': session_id}, exc_info=True)
-        connection_manager.disconnect(websocket)
+        logger.error(f"MCP health check failed: {e}")
+        raise HTTPException(status_code=500, detail=f"MCP health check failed: {str(e)}")
 
 @app.get("/metrics")
 async def metrics_endpoint():
-    """Get application metrics and statistics."""
+    """Get comprehensive performance metrics."""
     try:
         metrics = {
             "timestamp": datetime.now().isoformat(),
-            "active_websocket_connections": len(connection_manager.active_connections),
-            "mcp_servers": {},
-            "agent_status": "unavailable"
+            "application": {
+                "status": "running",
+                "websocket_connections": len(manager.active_connections)
+            }
         }
-        
-        # MCP server metrics
-        health = await mcp_manager.health_check()
-        metrics["mcp_servers"] = health
         
         # Agent metrics
         if financial_agent:
-            agent_health = await financial_agent.get_health()
-            metrics["agent_status"] = "available"
-            metrics["agent_details"] = agent_health
+            metrics["agent"] = financial_agent.get_metrics()
+        
+        # MCP metrics
+        if mcp_manager:
+            mcp_health = await mcp_manager.health_check()
+            metrics["mcp"] = mcp_health
         
         return metrics
-    
+        
     except Exception as e:
-        logger.error(f"Metrics error: {e}")
-        raise HTTPException(status_code=500, detail=f"Error retrieving metrics: {str(e)}")
+        logger.error(f"Error getting metrics: {e}")
+        raise HTTPException(status_code=500, detail=f"Error getting metrics: {str(e)}")
+
+# WebSocket endpoint for real-time communication
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    """WebSocket endpoint for real-time chat interface."""
+    await manager.connect(websocket)
+    
+    try:
+        while True:
+            # Receive message from client
+            data = await websocket.receive_text()
+            
+            try:
+                message_data = json.loads(data)
+                content = message_data.get("content", "")
+                
+                if content.strip():
+                    # Process with financial agent
+                    if financial_agent:
+                        start_time = datetime.now()
+                        response = await financial_agent.process_message(content)
+                        processing_time = (datetime.now() - start_time).total_seconds()
+                        
+                        # Send response back to client
+                        response_data = {
+                            "type": "response",
+                            "content": response,
+                            "session_id": financial_agent.session_id,
+                            "processing_time": processing_time,
+                            "timestamp": datetime.now().isoformat()
+                        }
+                        
+                        await manager.send_personal_message(
+                            json.dumps(response_data), 
+                            websocket
+                        )
+                    else:
+                        # Agent not available
+                        error_response = {
+                            "type": "error",
+                            "content": "Financial agent not available",
+                            "timestamp": datetime.now().isoformat()
+                        }
+                        await manager.send_personal_message(
+                            json.dumps(error_response), 
+                            websocket
+                        )
+                        
+            except json.JSONDecodeError:
+                # Handle invalid JSON
+                error_response = {
+                    "type": "error",
+                    "content": "Invalid message format",
+                    "timestamp": datetime.now().isoformat()
+                }
+                await manager.send_personal_message(
+                    json.dumps(error_response), 
+                    websocket
+                )
+                
+            except Exception as e:
+                # Handle processing errors
+                logger.error(f"WebSocket processing error: {e}")
+                error_response = {
+                    "type": "error",
+                    "content": f"Error processing message: {str(e)}",
+                    "timestamp": datetime.now().isoformat()
+                }
+                await manager.send_personal_message(
+                    json.dumps(error_response), 
+                    websocket
+                )
+                
+    except WebSocketDisconnect:
+        manager.disconnect(websocket)
+        logger.info("WebSocket client disconnected")
+        
+    except Exception as e:
+        logger.error(f"WebSocket error: {e}")
+        manager.disconnect(websocket)
 
 # Error handlers
-@app.exception_handler(500)
-async def internal_error_handler(request, exc):
-    logger.error(f"Internal server error: {exc}")
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request, exc):
+    """Handle HTTP exceptions with structured logging."""
+    logger.error(f"HTTP {exc.status_code}: {exc.detail}")
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={
+            "error": exc.detail,
+            "status_code": exc.status_code,
+            "timestamp": datetime.now().isoformat()
+        }
+    )
+
+@app.exception_handler(Exception)
+async def general_exception_handler(request, exc):
+    """Handle general exceptions with structured logging."""
+    logger.error(f"Unhandled exception: {exc}")
     return JSONResponse(
         status_code=500,
-        content={"detail": "Internal server error occurred"}
+        content={
+            "error": "Internal server error",
+            "status_code": 500,
+            "timestamp": datetime.now().isoformat()
+        }
     )
 
-@app.exception_handler(503)
-async def service_unavailable_handler(request, exc):
-    logger.warning(f"Service unavailable: {exc}")
-    return JSONResponse(
-        status_code=503,
-        content={"detail": "Service temporarily unavailable"}
-    )
-
+# Development server
 if __name__ == "__main__":
-    # Use wsproto instead of websockets to avoid deprecation warnings
     uvicorn.run(
-        "backend.main:app",
-        host=config.server.host,
-        port=config.server.port,
-        reload=config.server.debug,
-        log_level="info",
-        ws="wsproto"  # Use wsproto instead of websockets
+        "main:app",
+        host="0.0.0.0",
+        port=8000,
+        reload=True,
+        log_level="info"
     )

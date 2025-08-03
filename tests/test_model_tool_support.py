@@ -90,11 +90,9 @@ async def main():
     print("=" * 60)
     
     models_to_test = [
-        "llama3.1",  # Known to support tools well
-        "deepseek-r1:8b",  # This should support tools
-        "gemma-3-12b-it-Q4_K_M:latest",
-        "Qwen3-30B-A3B-Instruct-2507-Q4_K_M:latest", 
-        "DeepSeek-R1-0528-Qwen3-8B-Q4_K_M:latest"
+        "llama3.1",  # Known to support tools well (ollama version)
+        "deepseek-r1:32b",  # This should support tools (ollama version)
+        "deepseek-r1:8b",  # This might support tools (LM studio version)
     ]
     
     results = {}

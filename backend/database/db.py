@@ -1,16 +1,16 @@
 """
-Optimized Database Connection Manager
-====================================
+Database Connection Manager
+===========================
 
-Connection pooling and caching for SQLite database operations
-to improve performance of MCP server operations.
+High-performance connection pooling and caching for SQLite database operations
+to provide fast and efficient database access for MCP server operations.
 
-Key optimizations:
-- Connection pooling
+Key features:
+- Connection pooling for concurrent access
 - Prepared statement caching
 - Result caching for frequent queries
-- Transaction batching
-- Connection reuse
+- Transaction batching capabilities
+- Connection reuse and optimization
 """
 
 import sqlite3
@@ -207,7 +207,7 @@ class QueryCache:
                 "fill_ratio": len(self._cache) / self.max_size
             }
 
-class OptimizedDatabaseManager:
+class DatabaseManager:
     """High-performance database manager with connection pooling and caching."""
     
     def __init__(self, database_path: str, pool_size: int = 10, cache_size: int = 1000):
@@ -385,13 +385,11 @@ class OptimizedDatabaseManager:
         logger.info("OptimizedDatabaseManager closed")
 
 # Global database manager instance
-_db_manager: Optional[OptimizedDatabaseManager] = None
+_db_manager: Optional[DatabaseManager] = None
 
-def get_optimized_db_manager(database_path: str = "/home/notroot/Work/financebud/financial_data.db") -> OptimizedDatabaseManager:
-    """Get or create the global database manager."""
+def get_db_manager(database_path: str = "/home/notroot/Work/financebud/financial_data.db") -> DatabaseManager:
+    """Get a singleton instance of the database manager."""
     global _db_manager
-    
     if _db_manager is None:
-        _db_manager = OptimizedDatabaseManager(database_path)
-    
+        _db_manager = DatabaseManager(database_path)
     return _db_manager

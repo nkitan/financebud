@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """
-Optimized FastMCP server for querying consolidated financial database.
+FastMCP server for querying consolidated financial database.
 Provides standardized tools for LLMs to access bank statement data with
-significant performance improvements.
+high-performance features including connection pooling, query caching,
+and optimized database operations.
 
-Key optimizations:
+Key features:
 - Connection pooling for database operations
-- Query result caching
-- Prepared statements
+- Intelligent query result caching with TTL
+- Prepared statements for better performance
 - Batch processing capabilities
-- Reduced memory allocations
+- Performance monitoring and statistics
 - Optimized JSON serialization
 
 All amounts are in INR (Indian Rupees).
@@ -22,17 +23,17 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional
 from fastmcp import FastMCP
 
-# Import optimized database manager
+# Import database manager
 import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from backend.database.optimized_db import get_optimized_db_manager
+from backend.database.db import DatabaseManager, QueryCache, get_db_manager
 
 # Initialize the MCP server
-mcp = FastMCP("Optimized Financial Data Server")
+mcp = FastMCP("Financial Data Server")
 
-# Get optimized database manager
-db_manager = get_optimized_db_manager()
+# Get database manager
+db_manager = get_db_manager()
 
 def format_inr(amount: float) -> str:
     """Format amount as INR currency."""
