@@ -484,6 +484,214 @@ def get_database_schema() -> str:
         return serialize_result({"error": f"Error getting database schema: {str(e)}"})
 
 @mcp.tool()
+def find_recurring_payments(min_occurrences: int = 3, days_back: int = 90) -> str:
+    """Find potential recurring payments by analyzing transaction patterns. All amounts in INR."""
+    try:
+        # Validate parameters
+        min_occurrences = max(2, min(min_occurrences, 10))
+        days_back = max(7, min(days_back, 365))
+        
+        start_date = (datetime.now() - timedelta(days=days_back)).strftime('%Y-%m-%d')
+        
+        result = db_manager.execute_query(
+            """
+            WITH recurring_candidates AS (
+                SELECT 
+                    CASE 
+                        WHEN beneficiary_name IS NOT NULL AND LENGTH(beneficiary_name) > 3 
+                        THEN beneficiary_name
+                        ELSE SUBSTR(description, 1, 30)
+                    END as payee,
+                    ROUND(debit_amount, 2) as amount,
+                    COUNT(*) as frequency,
+                    MIN(transaction_date) as first_seen,
+                    MAX(transaction_date) as last_seen,
+                    AVG(julianday(transaction_date) - julianday(LAG(transaction_date) OVER (PARTITION BY 
+                        CASE 
+                            WHEN beneficiary_name IS NOT NULL AND LENGTH(beneficiary_name) > 3 
+                            THEN beneficiary_name
+                            ELSE SUBSTR(description, 1, 30)
+                        END, 
+                        ROUND(debit_amount, 2) 
+                        ORDER BY transaction_date))) as avg_days_between
+                FROM transactions 
+                WHERE debit_amount IS NOT NULL 
+                    AND debit_amount > 100  -- Filter out small transactions
+                    AND transaction_date >= ?
+                GROUP BY 
+                    CASE 
+                        WHEN beneficiary_name IS NOT NULL AND LENGTH(beneficiary_name) > 3 
+                        THEN beneficiary_name
+                        ELSE SUBSTR(description, 1, 30)
+                    END,
+                    ROUND(debit_amount, 2)
+                HAVING COUNT(*) >= ?
+                    AND julianday(MAX(transaction_date)) - julianday(MIN(transaction_date)) >= 14  -- At least 2 weeks apart
+            )
+            SELECT 
+                payee,
+                amount,
+                frequency,
+                first_seen,
+                last_seen,
+                ROUND(avg_days_between, 1) as avg_days_between,
+                CASE 
+                    WHEN avg_days_between BETWEEN 28 AND 32 THEN 'Monthly'
+                    WHEN avg_days_between BETWEEN 6 AND 8 THEN 'Weekly'
+                    WHEN avg_days_between BETWEEN 13 AND 16 THEN 'Bi-weekly'
+                    WHEN avg_days_between BETWEEN 89 AND 93 THEN 'Quarterly'
+                    ELSE 'Irregular'
+                END as pattern_type,
+                amount * frequency as total_spent
+            FROM recurring_candidates
+            ORDER BY frequency DESC, total_spent DESC
+            LIMIT 20
+            """,
+            (start_date, min_occurrences),
+            cache_ttl=300  # Cache for 5 minutes
+        )
+        
+        recurring_payments = result.data
+        
+        # Add INR formatting and calculate statistics
+        total_recurring_amount = 0
+        for payment in recurring_payments:
+            payment['amount_inr'] = format_inr(payment['amount'])
+            payment['total_spent_inr'] = format_inr(payment['total_spent'])
+            total_recurring_amount += payment['total_spent']
+        
+        response = {
+            "analysis_period_days": days_back,
+            "minimum_occurrences": min_occurrences,
+            "recurring_payments": recurring_payments,
+            "summary": {
+                "total_recurring_payees": len(recurring_payments),
+                "total_recurring_amount_inr": format_inr(total_recurring_amount),
+                "total_recurring_amount_raw": total_recurring_amount,
+                "pattern_distribution": {
+                    pattern: len([p for p in recurring_payments if p['pattern_type'] == pattern])
+                    for pattern in ['Monthly', 'Weekly', 'Bi-weekly', 'Quarterly', 'Irregular']
+                }
+            },
+            "performance": {
+                "execution_time": result.execution_time,
+                "cached": result.cached
+            }
+        }
+        
+        return serialize_result(response)
+    except Exception as e:
+        return serialize_result({"error": f"Error finding recurring payments: {str(e)}"})
+
+@mcp.tool()
+def analyze_spending_trends(months_back: int = 6) -> str:
+    """Analyze spending trends over the last N months. All amounts in INR."""
+    try:
+        # Validate months_back
+        months_back = max(1, min(months_back, 24))
+        
+        # Calculate start date
+        start_date = (datetime.now() - timedelta(days=months_back * 30)).strftime('%Y-%m-%d')
+        
+        result = db_manager.execute_query(
+            """
+            SELECT 
+                strftime('%Y-%m', transaction_date) as month,
+                COUNT(*) as transaction_count,
+                SUM(CASE WHEN debit_amount IS NOT NULL THEN debit_amount ELSE 0 END) as total_debits,
+                SUM(CASE WHEN credit_amount IS NOT NULL THEN credit_amount ELSE 0 END) as total_credits,
+                AVG(CASE WHEN debit_amount IS NOT NULL THEN debit_amount ELSE 0 END) as avg_debit,
+                AVG(CASE WHEN credit_amount IS NOT NULL THEN credit_amount ELSE 0 END) as avg_credit,
+                
+                -- Category breakdowns
+                SUM(CASE WHEN debit_amount IS NOT NULL AND (LOWER(description) LIKE '%upi%' OR LOWER(description) LIKE '%paytm%' OR LOWER(description) LIKE '%gpay%') THEN debit_amount ELSE 0 END) as upi_spending,
+                SUM(CASE WHEN debit_amount IS NOT NULL AND (LOWER(description) LIKE '%atm%' OR LOWER(description) LIKE '%cash%') THEN debit_amount ELSE 0 END) as cash_withdrawals,
+                SUM(CASE WHEN debit_amount IS NOT NULL AND (LOWER(description) LIKE '%grocery%' OR LOWER(description) LIKE '%supermarket%') THEN debit_amount ELSE 0 END) as grocery_spending,
+                SUM(CASE WHEN debit_amount IS NOT NULL AND (LOWER(description) LIKE '%fuel%' OR LOWER(description) LIKE '%petrol%') THEN debit_amount ELSE 0 END) as fuel_spending
+                
+            FROM transactions 
+            WHERE transaction_date >= ?
+            GROUP BY strftime('%Y-%m', transaction_date)
+            ORDER BY month DESC
+            """,
+            (start_date,),
+            cache_ttl=300  # Cache for 5 minutes
+        )
+        
+        monthly_data = result.data
+        
+        # Calculate trends and add INR formatting
+        if len(monthly_data) > 1:
+            # Calculate month-over-month changes
+            for i in range(len(monthly_data) - 1):
+                current = monthly_data[i]
+                previous = monthly_data[i + 1]
+                
+                # Add INR formatting
+                current['total_debits_inr'] = format_inr(current['total_debits'])
+                current['total_credits_inr'] = format_inr(current['total_credits'])
+                current['avg_debit_inr'] = format_inr(current['avg_debit'])
+                current['avg_credit_inr'] = format_inr(current['avg_credit'])
+                current['upi_spending_inr'] = format_inr(current['upi_spending'])
+                current['cash_withdrawals_inr'] = format_inr(current['cash_withdrawals'])
+                current['grocery_spending_inr'] = format_inr(current['grocery_spending'])
+                current['fuel_spending_inr'] = format_inr(current['fuel_spending'])
+                current['net_amount_inr'] = format_inr(current['total_credits'] - current['total_debits'])
+                
+                # Calculate percentage changes
+                if previous['total_debits'] > 0:
+                    current['spending_change_pct'] = ((current['total_debits'] - previous['total_debits']) / previous['total_debits']) * 100
+                else:
+                    current['spending_change_pct'] = 0
+                    
+                if previous['total_credits'] > 0:
+                    current['income_change_pct'] = ((current['total_credits'] - previous['total_credits']) / previous['total_credits']) * 100
+                else:
+                    current['income_change_pct'] = 0
+            
+            # Format the last month too
+            if monthly_data:
+                last_month = monthly_data[-1]
+                last_month['total_debits_inr'] = format_inr(last_month['total_debits'])
+                last_month['total_credits_inr'] = format_inr(last_month['total_credits'])
+                last_month['avg_debit_inr'] = format_inr(last_month['avg_debit'])
+                last_month['avg_credit_inr'] = format_inr(last_month['avg_credit'])
+                last_month['upi_spending_inr'] = format_inr(last_month['upi_spending'])
+                last_month['cash_withdrawals_inr'] = format_inr(last_month['cash_withdrawals'])
+                last_month['grocery_spending_inr'] = format_inr(last_month['grocery_spending'])
+                last_month['fuel_spending_inr'] = format_inr(last_month['fuel_spending'])
+                last_month['net_amount_inr'] = format_inr(last_month['total_credits'] - last_month['total_debits'])
+                last_month['spending_change_pct'] = 0
+                last_month['income_change_pct'] = 0
+        
+        # Calculate overall statistics
+        total_months = len(monthly_data)
+        avg_monthly_spending = sum(month['total_debits'] for month in monthly_data) / total_months if total_months > 0 else 0
+        avg_monthly_income = sum(month['total_credits'] for month in monthly_data) / total_months if total_months > 0 else 0
+        
+        response = {
+            "analysis_period_months": months_back,
+            "monthly_trends": monthly_data,
+            "summary": {
+                "total_months_analyzed": total_months,
+                "avg_monthly_spending_inr": format_inr(avg_monthly_spending),
+                "avg_monthly_income_inr": format_inr(avg_monthly_income),
+                "avg_monthly_net_inr": format_inr(avg_monthly_income - avg_monthly_spending),
+                "avg_monthly_spending_raw": avg_monthly_spending,
+                "avg_monthly_income_raw": avg_monthly_income,
+                "trend_direction": "increasing" if len(monthly_data) >= 2 and monthly_data[0]['total_debits'] > monthly_data[1]['total_debits'] else "decreasing" if len(monthly_data) >= 2 else "stable"
+            },
+            "performance": {
+                "execution_time": result.execution_time,
+                "cached": result.cached
+            }
+        }
+        
+        return serialize_result(response)
+    except Exception as e:
+        return serialize_result({"error": f"Error analyzing spending trends: {str(e)}"})
+
+@mcp.tool()
 def get_performance_stats() -> str:
     """Get performance statistics for the optimized MCP server."""
     try:

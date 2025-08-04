@@ -28,11 +28,16 @@ from datetime import datetime
 import uvicorn
 import os
 from contextlib import asynccontextmanager
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 # Import high-performance components
 from .agents.financial_agent import FinancialAgent, get_financial_agent
 from .agents.llm_providers import LLMConfig, ProviderType, get_default_config
 from .mcp.client import MCPManager, get_mcp_manager
+from .database.db import get_db_manager
 from .config import config
 
 # Import centralized logging configuration
@@ -117,6 +122,10 @@ async def lifespan(app: FastAPI):
     logger.info("🚀 Starting FinanceBud backend with performance optimizations...")
     
     try:
+        # Initialize database manager first (singleton)
+        db_manager = get_db_manager()
+        logger.info("✅ Database manager initialized")
+        
         # Initialize high-performance MCP manager
         mcp_manager = await get_mcp_manager()
         await mcp_manager.initialize_default_servers()
@@ -135,6 +144,11 @@ async def lifespan(app: FastAPI):
     # Shutdown
     logger.info("🛑 Shutting down FinanceBud backend...")
     try:
+        # Close database connections
+        db_manager = get_db_manager()
+        db_manager.close()
+        logger.info("✅ Database connections closed")
+        
         if mcp_manager:
             await mcp_manager.shutdown()
         logger.info("✅ Backend shutdown completed")
@@ -240,9 +254,7 @@ async def chat_endpoint(message: ChatMessage, agent: FinancialAgent = Depends(ge
 async def get_financial_summary():
     """Get financial summary directly from the database."""
     try:
-        # Import database manager directly
-        from .database.db import get_db_manager
-        
+        # Use the already initialized database manager singleton
         db_manager = get_db_manager()
         
         # Get total transactions count
@@ -338,25 +350,61 @@ async def websocket_session_endpoint(websocket: WebSocket, session_id: str):
                 content = message_data.get("content", "")
                 
                 if content.strip():
+                    logger.info(f"Processing message: {content[:50]}...")
                     # Process with financial agent
                     if financial_agent:
                         start_time = datetime.now()
-                        response = await financial_agent.process_message(content)
-                        processing_time = (datetime.now() - start_time).total_seconds()
+                        logger.info("Starting agent.process_message")
                         
-                        # Send response back to client
-                        response_data = {
-                            "type": "response",
-                            "content": response,
-                            "session_id": session_id,
-                            "processing_time": processing_time,
-                            "timestamp": datetime.now().isoformat()
-                        }
+                        try:
+                            # Add timeout wrapper to prevent hanging
+                            response = await asyncio.wait_for(
+                                financial_agent.process_message(content),
+                                timeout=320.0  # 5 minutes + 20 seconds buffer
+                            )
+                            processing_time = (datetime.now() - start_time).total_seconds()
+                            
+                            logger.info(f"Agent response received in {processing_time:.2f}s: {response[:100]}...")
+                            
+                            # Send response back to client
+                            response_data = {
+                                "type": "response",
+                                "content": response,
+                                "session_id": session_id,
+                                "processing_time": processing_time,
+                                "timestamp": datetime.now().isoformat()
+                            }
+                            
+                            await manager.send_personal_message(
+                                json.dumps(response_data), 
+                                websocket
+                            )
+                            logger.info("Response sent to client")
                         
-                        await manager.send_personal_message(
-                            json.dumps(response_data), 
-                            websocket
-                        )
+                        except asyncio.TimeoutError:
+                            processing_time = (datetime.now() - start_time).total_seconds()
+                            logger.error(f"Agent processing timed out after {processing_time:.2f}s")
+                            error_response = {
+                                "type": "error",
+                                "content": "Request timed out. Please try a simpler question.",
+                                "timestamp": datetime.now().isoformat()
+                            }
+                            await manager.send_personal_message(
+                                json.dumps(error_response), 
+                                websocket
+                            )
+                        except Exception as e:
+                            processing_time = (datetime.now() - start_time).total_seconds()
+                            logger.error(f"Agent processing failed after {processing_time:.2f}s: {e}")
+                            error_response = {
+                                "type": "error",
+                                "content": f"Processing failed: {str(e)}",
+                                "timestamp": datetime.now().isoformat()
+                            }
+                            await manager.send_personal_message(
+                                json.dumps(error_response), 
+                                websocket
+                            )
                     else:
                         # Agent not available
                         error_response = {

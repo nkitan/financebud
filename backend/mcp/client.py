@@ -345,10 +345,10 @@ class MCPConnection:
                     await asyncio.sleep(1.0)
                     continue
                 
-                # Read a line with timeout
+                # Read a line with timeout (should be longer than typical tool execution time)
                 line = await asyncio.wait_for(
                     self._read_line_async(),
-                    timeout=1.0
+                    timeout=30.0  # Increased timeout to handle database queries
                 )
                 
                 if not line:
@@ -367,7 +367,9 @@ class MCPConnection:
                     logger.warning(f"Invalid JSON response from {self.config.name}: {line[:100]}")
                 
             except asyncio.TimeoutError:
-                continue  # Normal timeout, continue reading
+                # If no response received in 30 seconds, continue
+                # This indicates the server might be unresponsive
+                continue
             except Exception as e:
                 logger.error(f"Response reader error for {self.config.name}: {e}")
                 await asyncio.sleep(1.0)

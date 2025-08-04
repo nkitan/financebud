@@ -75,33 +75,44 @@ class ConnectionPool:
     
     @contextmanager
     def get_connection(self):
-        """Get a connection from the pool."""
+        """Get a connection from the pool with deadlock prevention."""
         conn = None
+        is_temporary = False
         try:
-            # Try to get from pool with timeout
+            # Try to get from pool with short timeout first
             try:
-                conn = self._pool.get(timeout=5.0)
+                conn = self._pool.get(timeout=1.0)  # Short timeout to prevent hanging
             except queue.Empty:
                 # Create new connection if pool is empty and we haven't hit limit
                 with self._lock:
                     if self._created_connections < self.max_connections:
                         conn = self._create_connection()
                     else:
-                        # Wait longer for a connection to become available
-                        conn = self._pool.get(timeout=10.0)
+                        # If pool is full, try one more time with slightly longer timeout
+                        try:
+                            conn = self._pool.get(timeout=2.0)  # Reduced from 10.0s
+                        except queue.Empty:
+                            # Create a temporary connection instead of hanging
+                            logger.warning("Connection pool exhausted, creating temporary connection")
+                            conn = self._create_connection()
+                            is_temporary = True  # Track as temporary
             
             yield conn
             
         finally:
             if conn:
-                # Return connection to pool
-                try:
-                    self._pool.put_nowait(conn)
-                except queue.Full:
-                    # Pool is full, close this connection
+                # Return connection to pool (unless it's temporary)
+                if is_temporary:
+                    # Close temporary connection without returning to pool
                     conn.close()
-                    with self._lock:
-                        self._created_connections -= 1
+                else:
+                    try:
+                        self._pool.put_nowait(conn)
+                    except queue.Full:
+                        # Pool is full, close this connection
+                        conn.close()
+                        with self._lock:
+                            self._created_connections -= 1
     
     def close_all(self):
         """Close all connections in the pool."""

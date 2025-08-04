@@ -15,6 +15,10 @@ from abc import ABC, abstractmethod
 from typing import Dict, List, Any, Optional
 from dataclasses import dataclass
 from enum import Enum
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 # Import centralized logging
 from ..logging_config import get_logger_with_context
@@ -34,7 +38,7 @@ class LLMConfig:
     """Configuration for LLM providers."""
     provider: ProviderType
     base_url: str
-    api_key: Optional[str] = None
+    api_key: str = "GENERIC_API_KEY"
     model: str = "llama3.1"
     timeout: int = 300
     max_tokens: int = 1500
@@ -90,6 +94,13 @@ class OllamaProvider(LLMProvider):
         # Log the chat request
         logger.log_chat_request(messages, session_id=f"ollama_{self.config.model}")
         
+        # Set longer timeouts for complex tool processing
+        timeout = self.config.timeout
+        if tools and len(tools) > 0:
+            timeout = min(timeout, 300)  # Max 5 minutes when processing with tools
+        else:
+            timeout = min(timeout, 300)  # Max 5 minutes for regular chat
+        
         payload = {
             "model": self.config.model,
             "messages": messages,
@@ -107,7 +118,7 @@ class OllamaProvider(LLMProvider):
                 async with session.post(
                     self.chat_url,
                     json=payload,
-                    timeout=aiohttp.ClientTimeout(total=self.config.timeout)
+                    timeout=aiohttp.ClientTimeout(total=timeout)
                 ) as response:
                     if response.status == 200:
                         result = await response.json()
@@ -268,12 +279,14 @@ class OpenAIProvider(LLMProvider):
             return False
 
 class GeminiProvider(LLMProvider):
-    """Google Gemini provider (via OpenAI-compatible endpoint)."""
+    """Google Gemini provider (OpenAI-compatible endpoint)."""
     
     def __init__(self, config: LLMConfig):
         super().__init__(config)
-        # Assuming Gemini has an OpenAI-compatible endpoint
-        self.chat_url = f"{config.base_url}/v1/chat/completions"
+        # Use the correct OpenAI-compatible endpoint for Gemini
+        # The base URL should already include the path, so we just append the chat completions endpoint
+        self.chat_url = f"{config.base_url}/chat/completions"
+        print(self.chat_url, config.api_key)
         self.headers = {
             "Authorization": f"Bearer {config.api_key}",
             "Content-Type": "application/json"
@@ -285,6 +298,19 @@ class GeminiProvider(LLMProvider):
         tools: Optional[List[Dict[str, Any]]] = None
     ) -> Dict[str, Any]:
         """Send chat completion request to Gemini."""
+        import time
+        start_time = time.time()
+        
+        # Log the chat request
+        logger.log_chat_request(messages, session_id=f"gemini_{self.config.model}")
+        
+        # Set longer timeouts for complex tool processing
+        timeout = self.config.timeout
+        if tools and len(tools) > 0:
+            timeout = min(timeout, 300)  # Max 5 minutes when processing with tools
+        else:
+            timeout = min(timeout, 300)  # Max 5 minutes for regular chat
+        
         payload = {
             "model": self.config.model,
             "messages": messages,
@@ -292,6 +318,7 @@ class GeminiProvider(LLMProvider):
             "temperature": self.config.temperature
         }
         
+        # Add tools if provided (OpenAI format works directly)
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"
@@ -302,16 +329,75 @@ class GeminiProvider(LLMProvider):
                     self.chat_url,
                     json=payload,
                     headers=self.headers,
-                    timeout=aiohttp.ClientTimeout(total=self.config.timeout)
+                    timeout=aiohttp.ClientTimeout(total=timeout)
                 ) as response:
                     if response.status == 200:
-                        return await response.json()
+                        result = await response.json()
+                        execution_time = time.time() - start_time
+                        
+                        # Extract response content for logging
+                        response_content = ""
+                        if 'choices' in result and len(result['choices']) > 0:
+                            choice = result['choices'][0]
+                            if 'message' in choice and 'content' in choice['message']:
+                                response_content = choice['message']['content']
+                        
+                        # Log the successful response
+                        logger.log_chat_response(
+                            response_content,
+                            execution_time=execution_time,
+                            session_id=f"gemini_{self.config.model}"
+                        )
+                        
+                        logger.debug(f"Gemini API success: {result}")
+                        return result
                     else:
+                        execution_time = time.time() - start_time
                         error_text = await response.text()
-                        raise Exception(f"Gemini returned status {response.status}: {error_text}")
+                        error_msg = f"Gemini returned status {response.status}: {error_text}"
+                        
+                        # Log the error response
+                        logger.log_chat_response(
+                            f"ERROR: {error_msg}",
+                            execution_time=execution_time,
+                            session_id=f"gemini_{self.config.model}",
+                            level=logging.ERROR
+                        )
+                        logger.error(error_msg)
+                        return self._error_response(error_msg)
+        except asyncio.TimeoutError as e:
+            execution_time = time.time() - start_time
+            error_msg = f"Gemini API timeout after {timeout}s"
+            logger.log_chat_response(
+                f"ERROR: {error_msg}",
+                execution_time=execution_time,
+                session_id=f"gemini_{self.config.model}",
+                level=logging.ERROR
+            )
+            logger.error(error_msg)
+            return self._error_response(error_msg)
+        except aiohttp.ClientError as e:
+            execution_time = time.time() - start_time
+            error_msg = f"Gemini API client error: {str(e)}"
+            logger.log_chat_response(
+                f"ERROR: {error_msg}",
+                execution_time=execution_time,
+                session_id=f"gemini_{self.config.model}",
+                level=logging.ERROR
+            )
+            logger.error(error_msg)
+            return self._error_response(error_msg)
         except Exception as e:
-            logger.error(f"Gemini API call failed: {e}")
-            return self._error_response(str(e))
+            execution_time = time.time() - start_time
+            error_msg = f"Gemini API unexpected error: {type(e).__name__}: {str(e)}"
+            logger.log_chat_response(
+                f"ERROR: {error_msg}",
+                execution_time=execution_time,
+                session_id=f"gemini_{self.config.model}",
+                level=logging.ERROR
+            )
+            logger.error(error_msg)
+            return self._error_response(error_msg)
     
     async def test_connection(self) -> bool:
         """Test Gemini connection."""
@@ -327,7 +413,12 @@ class GeminiProvider(LLMProvider):
                     headers=self.headers,
                     timeout=aiohttp.ClientTimeout(total=5)
                 ) as response:
-                    return response.status == 200
+                    is_ok = response.status == 200
+                    if is_ok:
+                        logger.debug("Gemini connection test successful")
+                    else:
+                        logger.warning(f"Gemini connection test failed with status {response.status}")
+                    return is_ok
         except Exception as e:
             logger.warning(f"Gemini connection test failed: {e}")
             return False
@@ -432,24 +523,24 @@ def get_default_config() -> LLMConfig:
         ProviderType.OPENAI: {
             "base_url": os.getenv("OPENAI_BASE_URL", "https://api.openai.com"),
             "model": os.getenv("OPENAI_MODEL", "gpt-4"),
-            "api_key": os.getenv("OPENAI_API_KEY")
+            "api_key": os.getenv("OPENAI_API_KEY", "your_api_key_here")
         },
         ProviderType.GEMINI: {
-            "base_url": os.getenv("GEMINI_BASE_URL", "https://generativelanguage.googleapis.com"),
-            "model": os.getenv("GEMINI_MODEL", "gemini-pro"),
-            "api_key": os.getenv("GEMINI_API_KEY")
+            "base_url": os.getenv("GEMINI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai"),
+            "model": os.getenv("GEMINI_MODEL", "gemini-2.5-flash"),
+            "api_key": os.getenv("GEMINI_API_KEY", "your_api_key_here")
         },
         ProviderType.OPENROUTER: {
             "base_url": os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api"),
             "model": os.getenv("OPENROUTER_MODEL", "anthropic/claude-3-sonnet"),
-            "api_key": os.getenv("OPENROUTER_API_KEY")
+            "api_key": os.getenv("OPENROUTER_API_KEY", "your_api_key_here")
         }
     }
     
     config_data = defaults[provider]
     
-    # Set provider-specific timeout defaults
-    default_timeout = "300" if provider == ProviderType.OLLAMA else "30"
+    # Set provider-specific timeout defaults - increased for complex queries
+    default_timeout = "300" if provider == ProviderType.OLLAMA else "300"
     
     return LLMConfig(
         provider=provider,
@@ -457,6 +548,6 @@ def get_default_config() -> LLMConfig:
         api_key=config_data["api_key"],
         model=config_data["model"],
         timeout=int(os.getenv("LLM_TIMEOUT", default_timeout)),
-        max_tokens=int(os.getenv("LLM_MAX_TOKENS", "1500")),
+        max_tokens=int(os.getenv("LLM_MAX_TOKENS", "1000")),  # Increased for complete responses
         temperature=float(os.getenv("LLM_TEMPERATURE", "0.7"))
     )

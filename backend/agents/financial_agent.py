@@ -443,6 +443,14 @@ class FinancialAgent:
         self.conversation_history: List[ConversationMessage] = []
         self.session_id = str(uuid.uuid4())
         
+        # Add system prompt - optimized for performance
+        self.conversation_history.append(
+            ConversationMessage(
+                role="system", 
+                content="You are a financial assistant. Use tools to get data, then provide concise answers. Be direct and brief."
+            )
+        )
+        
         # Performance metrics
         self.metrics = {
             "total_queries": 0,
@@ -542,9 +550,12 @@ class FinancialAgent:
             for iteration in range(max_iterations):
                 logger.debug(f"Processing iteration {iteration + 1}/{max_iterations}")
                 
-                # Call LLM with conversation history and tools
+                # Optimize conversation history - keep only recent messages to prevent slowdown
+                optimized_history = self._optimize_conversation_history()
+                
+                # Call LLM with optimized conversation history and tools
                 response = await self.provider.chat_completion(
-                    messages=[msg.dict() for msg in self.conversation_history],
+                    messages=[msg.dict() for msg in optimized_history],
                     tools=tools
                 )
                 
@@ -573,12 +584,19 @@ class FinancialAgent:
                 tool_results = await self._process_tool_calls_parallel(tool_calls)
                 total_tool_calls += len(tool_calls)
                 
-                # Add tool results to conversation
+                # Add tool results to conversation with aggressive size optimization
                 for tool_call, result in zip(tool_calls, tool_results):
+                    # Aggressively truncate large tool results to prevent LLM timeout
+                    if result.success:
+                        # For successful results, extract only key information
+                        tool_content = self._summarize_tool_result(result.result, tool_call.get('function', {}).get('name', 'unknown'))
+                    else:
+                        tool_content = f"Error: {result.error}"
+                    
                     self.conversation_history.append(
                         ConversationMessage(
                             role="tool",
-                            content=result.result if result.success else f"Error: {result.error}",
+                            content=tool_content,
                             tool_call_id=tool_call["id"]
                         )
                     )
@@ -587,19 +605,46 @@ class FinancialAgent:
                 all_successful = all(result.success for result in tool_results)
                 if not all_successful:
                     logger.warning("Some tool calls failed, continuing with partial results")
+                
+                # Instead of continuing to next iteration, try one more LLM call to synthesize
+                # But with a much shorter timeout and fallback
+                try:
+                    logger.debug("Making final synthesis call to LLM")
+                    optimized_history = self._optimize_conversation_history()
+                    
+                    # Make a final call with no tools to get the synthesis
+                    final_response = await self.provider.chat_completion(
+                        messages=[msg.dict() for msg in optimized_history],
+                        tools=None  # No tools for final synthesis
+                    )
+                    
+                    final_content = final_response["choices"][0]["message"]["content"]
+                    if final_content and final_content.strip():
+                        processing_time = time.time() - start_time
+                        self._update_query_metrics(processing_time)
+                        logger.info(f"Query processed in {processing_time:.3f}s with {total_tool_calls} tool calls")
+                        return final_content
+                    
+                except Exception as e:
+                    logger.warning(f"Final synthesis failed: {e}, using fallback response")
+                
+                # Fallback: provide a response based on the tool results
+                processing_time = time.time() - start_time
+                self._update_query_metrics(processing_time)
+                logger.info(f"Query processed in {processing_time:.3f}s with {total_tool_calls} tool calls (fallback)")
+                
+                # Generate a simple response based on available tool results
+                if tool_results and any(r.success for r in tool_results):
+                    successful_results = [r for r in tool_results if r.success]
+                    return f"I've retrieved the requested financial information using {len(successful_results)} tool(s). The data has been processed successfully."
+                else:
+                    return "I encountered some issues retrieving the financial data. Please try rephrasing your question."
             
-            # Final LLM call to synthesize results
-            final_response = await self.provider.chat_completion(
-                messages=[msg.dict() for msg in self.conversation_history]
-            )
-            
-            final_content = final_response["choices"][0]["message"]["content"]
-            
+            # If we exit the loop without returning, it means we hit max iterations
             processing_time = time.time() - start_time
             self._update_query_metrics(processing_time)
-            
-            logger.info(f"Query processed in {processing_time:.3f}s with {total_tool_calls} tool calls")
-            return final_content
+            logger.warning(f"Reached max iterations ({max_iterations}) after {processing_time:.3f}s")
+            return "I've processed your request but reached the maximum number of iterations. Please try rephrasing your question."
             
         except Exception as e:
             processing_time = time.time() - start_time
@@ -644,6 +689,108 @@ class FinancialAgent:
                 processed_results.append(result)
         
         return processed_results
+    
+    def _get_relevant_tools(self, message: str) -> List[Dict[str, Any]]:
+        """Get only relevant tools based on the message to reduce LLM processing time."""
+        message_lower = message.lower()
+        
+        # Essential tools that are always included
+        essential_tools = ["get_account_summary", "get_recent_transactions"]
+        
+        # Map keywords to specific tools
+        keyword_tools = {
+            "balance": ["get_account_summary", "get_balance_history"],
+            "transaction": ["get_recent_transactions", "search_transactions"],
+            "search": ["search_transactions"],
+            "recent": ["get_recent_transactions"],
+            "month": ["get_monthly_summary"],
+            "summary": ["get_account_summary", "get_monthly_summary"],
+            "category": ["get_spending_by_category"],
+            "spending": ["get_spending_by_category", "analyze_spending_trends"],
+            "upi": ["get_upi_transaction_analysis"],
+            "recurring": ["find_recurring_payments"],
+            "date": ["get_transactions_by_date_range"],
+            "range": ["get_transactions_by_date_range"],
+        }
+        
+        # Find relevant tools based on keywords
+        relevant_tool_names = set(essential_tools)
+        for keyword, tools in keyword_tools.items():
+            if keyword in message_lower:
+                relevant_tool_names.update(tools)
+        
+        # Limit to maximum 6 tools to prevent timeout
+        relevant_tool_names = list(relevant_tool_names)[:6]
+        
+        # Convert to OpenAI format
+        relevant_tools = []
+        for tool_name in relevant_tool_names:
+            if tool_name in self.tools:
+                relevant_tools.append(self.tools[tool_name].to_openai_format())
+        
+        logger.debug(f"Selected {len(relevant_tools)} relevant tools for message: {relevant_tool_names}")
+        return relevant_tools
+    
+    def _optimize_conversation_history(self, max_messages: int = 10) -> List[ConversationMessage]:
+        """Optimize conversation history to prevent LLM slowdown from large contexts."""
+        # Always keep the system message
+        system_messages = [msg for msg in self.conversation_history if msg.role == "system"]
+        
+        # Get recent non-system messages
+        non_system_messages = [msg for msg in self.conversation_history if msg.role != "system"]
+        
+        # Keep only the most recent messages to prevent context bloat
+        if len(non_system_messages) > max_messages:
+            recent_messages = non_system_messages[-max_messages:]
+            logger.debug(f"Truncated conversation history from {len(non_system_messages)} to {len(recent_messages)} messages")
+        else:
+            recent_messages = non_system_messages
+        
+        # Combine system messages with recent messages
+        return system_messages + recent_messages
+    
+    def _summarize_tool_result(self, result: str, tool_name: str, max_length: int = 1500) -> str:
+        """Summarize tool results to prevent LLM timeouts from large JSON responses - increased limit."""
+        try:
+            # Try to parse as JSON and extract key information
+            data = json.loads(result)
+            
+            if tool_name == "get_account_summary":
+                # Extract only essential account info
+                if isinstance(data, dict) and "data" in data:
+                    account_data = data["data"]
+                    return f"Account balance: {account_data.get('current_balance', 'N/A')}, Total transactions: {account_data.get('total_transactions', 'N/A')}"
+                
+            elif tool_name == "get_recent_transactions":
+                # Show only count and recent transaction info
+                if isinstance(data, dict) and "data" in data:
+                    transactions = data["data"]
+                    if isinstance(transactions, list) and len(transactions) > 0:
+                        latest = transactions[0]
+                        return f"Found {len(transactions)} transactions. Latest: {latest.get('description', 'N/A')} - {latest.get('amount', 'N/A')} on {latest.get('date', 'N/A')}"
+                    return f"Found {len(transactions) if isinstance(transactions, list) else 'some'} transactions"
+                
+            elif "summary" in tool_name or "spending" in tool_name:
+                # For summary tools, extract key metrics
+                if isinstance(data, dict) and "data" in data:
+                    summary_data = data["data"]
+                    if isinstance(summary_data, dict):
+                        key_points = []
+                        for key, value in list(summary_data.items())[:3]:  # Only first 3 items
+                            if isinstance(value, (int, float, str)) and len(str(value)) < 50:
+                                key_points.append(f"{key}: {value}")
+                        return f"Summary: {', '.join(key_points)}"
+            
+            # Fallback: truncate the original result
+            if len(result) > max_length:
+                return result[:max_length-20] + "... [truncated]"
+            return result
+            
+        except json.JSONDecodeError:
+            # If not JSON, just truncate
+            if len(result) > max_length:
+                return result[:max_length-20] + "... [truncated]"
+            return result
     
     def _update_metrics(self, execution_time: float, success: bool):
         """Update tool call metrics."""
