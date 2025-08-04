@@ -53,6 +53,27 @@ class ConversationMessage(BaseModel):
     content: str
     tool_calls: Optional[List[Dict[str, Any]]] = None
     tool_call_id: Optional[str] = None
+    function_name: Optional[str] = None  # Add function name for tool responses
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to proper format for LLM providers."""
+        message: Dict[str, Any] = {
+            "role": self.role,
+            "content": self.content
+        }
+        
+        if self.tool_calls:
+            message["tool_calls"] = self.tool_calls
+            
+        if self.role == "tool" and self.tool_call_id:
+            # For tool responses, ensure we have the proper format
+            message["tool_call_id"] = self.tool_call_id
+            
+            # For Gemini API compatibility, add function response format
+            if self.function_name:
+                message["name"] = self.function_name
+        
+        return message
 
 class FinancialTool:
     """Represents a financial analysis tool with caching support."""
@@ -442,6 +463,7 @@ class FinancialAgent:
         self.tools = {tool.name: tool for tool in FINANCIAL_TOOLS}
         self.conversation_history: List[ConversationMessage] = []
         self.session_id = str(uuid.uuid4())
+        self.last_tools_used: List[str] = []  # Track last tools used
         
         # Add system prompt - optimized for performance
         self.conversation_history.append(
@@ -531,6 +553,9 @@ class FinancialAgent:
         """Process a user message with optimized tool calling."""
         start_time = time.time()
         
+        # Reset tools used for this message
+        self.last_tools_used = []
+        
         if not self.provider:
             await self.initialize()
         
@@ -555,7 +580,7 @@ class FinancialAgent:
                 
                 # Call LLM with optimized conversation history and tools
                 response = await self.provider.chat_completion(
-                    messages=[msg.dict() for msg in optimized_history],
+                    messages=[msg.to_dict() for msg in optimized_history],
                     tools=tools
                 )
                 
@@ -584,6 +609,12 @@ class FinancialAgent:
                 tool_results = await self._process_tool_calls_parallel(tool_calls)
                 total_tool_calls += len(tool_calls)
                 
+                # Track tools used
+                for tool_call in tool_calls:
+                    tool_name = tool_call.get('function', {}).get('name', 'unknown')
+                    if tool_name not in self.last_tools_used:
+                        self.last_tools_used.append(tool_name)
+                
                 # Add tool results to conversation with aggressive size optimization
                 for tool_call, result in zip(tool_calls, tool_results):
                     # Aggressively truncate large tool results to prevent LLM timeout
@@ -593,11 +624,15 @@ class FinancialAgent:
                     else:
                         tool_content = f"Error: {result.error}"
                     
+                    # Get function name for proper Gemini formatting
+                    function_name = tool_call.get('function', {}).get('name', 'unknown_function')
+                    
                     self.conversation_history.append(
                         ConversationMessage(
                             role="tool",
                             content=tool_content,
-                            tool_call_id=tool_call["id"]
+                            tool_call_id=tool_call["id"],
+                            function_name=function_name  # Add function name for Gemini compatibility
                         )
                     )
                 
@@ -614,7 +649,7 @@ class FinancialAgent:
                     
                     # Make a final call with no tools to get the synthesis
                     final_response = await self.provider.chat_completion(
-                        messages=[msg.dict() for msg in optimized_history],
+                        messages=[msg.to_dict() for msg in optimized_history],
                         tools=None  # No tools for final synthesis
                     )
                     
@@ -809,6 +844,10 @@ class FinancialAgent:
     def _update_query_metrics(self, processing_time: float):
         """Update query processing metrics."""
         self.metrics["total_queries"] += 1
+    
+    def get_last_tools_used(self) -> List[str]:
+        """Get the tools used in the last message processing."""
+        return self.last_tools_used.copy()
     
     def get_metrics(self) -> Dict[str, Any]:
         """Get performance metrics."""

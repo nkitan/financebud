@@ -335,6 +335,18 @@ class GeminiProvider(LLMProvider):
                         result = await response.json()
                         execution_time = time.time() - start_time
                         
+                        # Fix empty tool call IDs that Gemini returns
+                        if 'choices' in result:
+                            for choice in result['choices']:
+                                if 'message' in choice and 'tool_calls' in choice['message']:
+                                    tool_calls = choice['message']['tool_calls']
+                                    for i, tool_call in enumerate(tool_calls):
+                                        if not tool_call.get('id') or tool_call.get('id') == '':
+                                            # Generate a unique ID for this tool call
+                                            import uuid
+                                            tool_call['id'] = f"call_{uuid.uuid4().hex[:8]}"
+                                            logger.debug(f"Generated tool call ID: {tool_call['id']}")
+                        
                         # Extract response content for logging
                         response_content = ""
                         if 'choices' in result and len(result['choices']) > 0:

@@ -190,6 +190,11 @@
                                                     🔧 Used tools: <span x-text="message.metadata.tools_used.join(', ')"></span>
                                                 </div>
                                             </template>
+                                            <template x-if="message.metadata && message.metadata.execution_time">
+                                                <div class="mt-1 text-xs text-gray-400">
+                                                    ⏱️ <span x-text="message.metadata.execution_time.toFixed(2)"></span>s
+                                                </div>
+                                            </template>
                                         </div>
                                         <div class="text-xs text-gray-500 mt-1" x-text="formatTime(message.timestamp)"></div>
                                     </div>
@@ -395,13 +400,13 @@
                 handleWebSocketMessage(data) {
                     if (data.type === 'response') {
                         this.isTyping = false;
-                        this.addMessage('assistant', data.data.response, {
-                            tools_used: data.data.tools_used,
-                            execution_time: data.data.execution_time
+                        this.addMessage('assistant', data.content, {
+                            tools_used: data.tools_used || [],
+                            execution_time: data.processing_time
                         });
                     } else if (data.type === 'error') {
                         this.isTyping = false;
-                        this.addMessage('assistant', `Error: ${data.error}`);
+                        this.addMessage('assistant', `Error: ${data.content}`);
                     }
                 },
 
@@ -454,8 +459,8 @@
                             const data = await response.json();
                             this.isTyping = false;
                             this.addMessage('assistant', data.response, {
-                                tools_used: data.tools_used,
-                                execution_time: data.execution_time
+                                tools_used: data.tool_calls || [],
+                                execution_time: data.processing_time
                             });
                         }
                     } catch (error) {
@@ -472,12 +477,13 @@
 
                 // UI Helpers
                 formatMessage(content) {
-                    // Simple formatting for better display
+                    // Enhanced formatting for better display
                     return content
                         .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
                         .replace(/\*(.*?)\*/g, '<em>$1</em>')
                         .replace(/\n/g, '<br>')
-                        .replace(/₹([\d,]+\.?\d*)/g, '<span class="font-semibold text-green-600">₹$1</span>');
+                        .replace(/₹([\d,]+\.?\d*)/g, '<span class="font-semibold text-green-600">₹$1</span>')
+                        .replace(/•/g, '<span class="text-blue-600">•</span>');
                 },
 
                 formatTime(timestamp) {

@@ -364,14 +364,20 @@ async def websocket_session_endpoint(websocket: WebSocket, session_id: str):
                             )
                             processing_time = (datetime.now() - start_time).total_seconds()
                             
+                            # Get tools used in this response
+                            tools_used = financial_agent.get_last_tools_used()
+                            
                             logger.info(f"Agent response received in {processing_time:.2f}s: {response[:100]}...")
                             
                             # Send response back to client
                             response_data = {
                                 "type": "response",
-                                "content": response,
+                                "data": {
+                                    "response": response,
+                                    "tools_used": tools_used,
+                                    "execution_time": processing_time
+                                },
                                 "session_id": session_id,
-                                "processing_time": processing_time,
                                 "timestamp": datetime.now().isoformat()
                             }
                             

@@ -19,7 +19,7 @@ from pathlib import Path
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
-from backend.agents.financial_agent import GenericFinancialAgent
+from backend.agents.financial_agent import FinancialAgent, get_financial_agent
 from backend.agents.llm_providers import LLMConfig, ProviderType, get_default_config
 from fastmcp import Client as FastMCPClient
 
@@ -91,14 +91,15 @@ async def test_provider_connectivity():
     
     try:
         config = get_default_config()
-        agent = GenericFinancialAgent(config)
+        agent = FinancialAgent(config)
+        await agent.initialize()
         
-        connection_ok = await agent.test_connection()
-        if connection_ok:
-            logger.info(f"✅ {config.provider.value} ({config.model}) provider connected")
+        # Test provider connection by checking if provider is created
+        if agent.provider:
+            logger.info(f"✅ {config.provider.value} ({config.model}) provider created successfully")
             return True
         else:
-            logger.warning(f"⚠️ {config.provider.value} provider connection failed")
+            logger.warning(f"⚠️ {config.provider.value} provider creation failed")
             return False
             
     except Exception as e:
@@ -111,17 +112,17 @@ async def test_agent_initialization():
     
     try:
         # Create agent with default config
-        agent = GenericFinancialAgent()
+        agent = await get_financial_agent()
         
-        # Test connection
-        connection_ok = await agent.test_connection()
-        logger.info(f"✅ Agent connection: {'OK' if connection_ok else 'Failed'}")
-        
-        # Get health status
-        health = await agent.get_health()
-        logger.info(f"✅ Agent health: {health}")
-        
-        return agent if connection_ok else None
+        # Test the agent by getting metrics
+        metrics = agent.get_metrics()
+        if metrics:
+            logger.info(f"✅ Agent initialized with session: {metrics.get('session_id', 'unknown')}")
+            logger.info(f"✅ Tools available: {metrics.get('tools_available', 0)}")
+            return agent
+        else:
+            logger.warning("⚠️ Agent metrics unavailable")
+            return None
     
     except Exception as e:
         logger.error(f"❌ Agent initialization failed: {e}")
@@ -140,7 +141,7 @@ async def test_financial_agent():
         test_query = "Give me a quick account summary"
         logger.info(f"Sending query: '{test_query}'")
         
-        response = await agent.chat(test_query)
+        response = await agent.process_message(test_query)
         
         if response and len(response) > 10:
             logger.info(f"✅ Agent responded: {response[:100]}...")

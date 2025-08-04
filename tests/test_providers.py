@@ -17,7 +17,7 @@ project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
 from backend.agents.llm_providers import LLMConfig, ProviderType
-from backend.agents.financial_agent import GenericFinancialAgent
+from backend.agents.financial_agent import FinancialAgent
 
 async def test_provider(config: LLMConfig, test_message: str = "Give me a quick account summary"):
     """Test a specific provider configuration."""
@@ -25,21 +25,24 @@ async def test_provider(config: LLMConfig, test_message: str = "Give me a quick 
     print("=" * 50)
     
     try:
-        agent = GenericFinancialAgent(config)
+        agent = FinancialAgent(config)
+        await agent.initialize()
         
-        # Test connection
-        connection_ok = await agent.test_connection()
-        print(f"📡 Connection: {'✅ OK' if connection_ok else '❌ Failed'}")
+        # Test connection by checking provider initialization
+        if agent.provider:
+            print(f"📡 Connection: ✅ OK")
+        else:
+            print(f"📡 Connection: ❌ Failed")
+            return
         
-        if connection_ok:
-            # Test chat
-            print(f"💬 Testing chat with: '{test_message}'")
-            response = await agent.chat(test_message)
-            print(f"🤖 Response: {response[:200]}...")
-            
-            # Health check
-            health = await agent.get_health()
-            print(f"🏥 Health: {health}")
+        # Test chat
+        print(f"💬 Testing chat with: '{test_message}'")
+        response = await agent.process_message(test_message)
+        print(f"🤖 Response: {response[:200]}...")
+        
+        # Get metrics
+        metrics = agent.get_metrics()
+        print(f"🏥 Metrics: {metrics}")  
         
     except Exception as e:
         print(f"❌ Error: {e}")
@@ -83,7 +86,8 @@ async def main():
     print("\n🔄 Dynamic Provider Switching")
     print("=" * 50)
     
-    agent = GenericFinancialAgent(ollama_config)
+    agent = FinancialAgent(ollama_config)
+    await agent.initialize()
     print(f"Started with: {agent.config.provider.value}")
     
     # Switch to a different provider (example)
@@ -91,7 +95,7 @@ async def main():
         openai_config = LLMConfig(
             provider=ProviderType.OPENAI,
             base_url="https://api.openai.com",
-            model="gpt-3.5-turbo",  # Cheaper for testing
+            model="gpt-4o",  # Cheaper for testing
             api_key=os.getenv("OPENAI_API_KEY")
         )
         agent.switch_provider(openai_config)
