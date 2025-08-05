@@ -304,6 +304,42 @@ class GeminiProvider(LLMProvider):
         # Log the chat request
         logger.log_chat_request(messages, session_id=f"gemini_{self.config.model}")
         
+        # Validate messages for Gemini compatibility - check for empty function names
+        validated_messages = []
+        for i, msg in enumerate(messages):
+            if msg.get("role") == "tool":
+                # Ensure tool messages have a proper name field
+                msg_copy = msg.copy()  # Don't modify original
+                
+                # Check and fix name field with more robust validation
+                name_value = msg_copy.get("name")
+                if not name_value or not isinstance(name_value, str) or str(name_value).strip() == "":
+                    logger.warning(f"Tool message {i} missing or invalid name field. Original: {name_value}, Full msg: {msg}")
+                    msg_copy["name"] = f"fallback_function_{i}"
+                
+                # Also ensure tool_call_id is present for tool messages
+                tool_call_id = msg_copy.get("tool_call_id")
+                if not tool_call_id or not isinstance(tool_call_id, str) or str(tool_call_id).strip() == "":
+                    logger.warning(f"Tool message {i} missing or invalid tool_call_id. Original: {tool_call_id}")
+                    msg_copy["tool_call_id"] = f"fallback_call_{i}"
+                
+                # Final validation to ensure both fields are non-empty strings
+                final_name = str(msg_copy.get("name", "")).strip()
+                final_tool_call_id = str(msg_copy.get("tool_call_id", "")).strip()
+                
+                if not final_name:
+                    msg_copy["name"] = f"emergency_function_{i}"
+                    logger.error(f"Tool message {i} name still empty after validation, using emergency fallback")
+                
+                if not final_tool_call_id:
+                    msg_copy["tool_call_id"] = f"emergency_call_{i}"
+                    logger.error(f"Tool message {i} tool_call_id still empty after validation, using emergency fallback")
+                
+                validated_messages.append(msg_copy)
+                logger.info(f"Final validated tool message {i}: name='{msg_copy.get('name')}', tool_call_id='{msg_copy.get('tool_call_id')}'")
+            else:
+                validated_messages.append(msg)
+        
         # Set longer timeouts for complex tool processing
         timeout = self.config.timeout
         if tools and len(tools) > 0:
@@ -313,7 +349,7 @@ class GeminiProvider(LLMProvider):
         
         payload = {
             "model": self.config.model,
-            "messages": messages,
+            "messages": validated_messages,  # Use validated messages instead of original
             "max_tokens": self.config.max_tokens,
             "temperature": self.config.temperature
         }
@@ -322,6 +358,23 @@ class GeminiProvider(LLMProvider):
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"
+        
+        # Debug logging for Gemini requests with tool messages
+        tool_messages = [msg for msg in validated_messages if msg.get("role") == "tool"]
+        if tool_messages:
+            logger.info(f"Sending {len(tool_messages)} tool messages to Gemini:")
+            for i, tool_msg in enumerate(tool_messages):
+                logger.info(f"  Tool message {i+1}: name='{tool_msg.get('name')}', tool_call_id='{tool_msg.get('tool_call_id')}', content_length={len(tool_msg.get('content', ''))}")
+            
+            # Also log the full payload structure for debugging (but truncate content)
+            debug_payload = payload.copy()
+            debug_payload["messages"] = []
+            for msg in validated_messages:
+                debug_msg = msg.copy()
+                if len(debug_msg.get("content", "")) > 100:
+                    debug_msg["content"] = debug_msg["content"][:100] + "... [truncated]"
+                debug_payload["messages"].append(debug_msg)
+            logger.debug(f"Full Gemini payload structure: {json.dumps(debug_payload, indent=2)}")
         
         try:
             async with aiohttp.ClientSession() as session:
@@ -367,6 +420,9 @@ class GeminiProvider(LLMProvider):
                         execution_time = time.time() - start_time
                         error_text = await response.text()
                         error_msg = f"Gemini returned status {response.status}: {error_text}"
+                        
+                        # Log the request payload that caused the error for debugging
+                        logger.debug(f"Gemini request payload that caused error: {json.dumps(payload, indent=2)}")
                         
                         # Log the error response
                         logger.log_chat_response(

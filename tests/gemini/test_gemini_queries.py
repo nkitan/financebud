@@ -43,7 +43,11 @@ async def test_fixed_gemini():
     test_queries = [
         "Show me my account summary",
         "What are my recent transactions?",
-        "Give me a quick financial overview"
+        "Give me a quick financial overview",
+        "Find my recurring payments",
+        "Analyze my spending patterns",
+        "What is my current balance?",
+        "Summarize my investments",
     ]
     
     for query in test_queries:
@@ -68,6 +72,7 @@ async def main():
         print("\n🎉 All tests passed! Gemini fix is working.")
     else:
         print("\n💥 Some tests failed.")
+    exit(0 if success else 1)
 
 if __name__ == "__main__":
     asyncio.run(main())

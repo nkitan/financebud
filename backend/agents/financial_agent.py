@@ -65,13 +65,31 @@ class ConversationMessage(BaseModel):
         if self.tool_calls:
             message["tool_calls"] = self.tool_calls
             
-        if self.role == "tool" and self.tool_call_id:
-            # For tool responses, ensure we have the proper format
-            message["tool_call_id"] = self.tool_call_id
+        if self.role == "tool":
+            # For tool responses, ALWAYS ensure we have the proper format
+            if self.tool_call_id:
+                message["tool_call_id"] = self.tool_call_id
             
-            # For Gemini API compatibility, add function response format
-            if self.function_name:
-                message["name"] = self.function_name
+            # For Gemini API compatibility, ALWAYS add function response format
+            # Ensure function name is never empty or None
+            function_name = self.function_name
+            if not function_name or str(function_name).strip() == '':
+                function_name = 'unknown_function'
+                logger.warning(f"Tool message missing function_name, using fallback: {function_name}")
+            
+            message["name"] = function_name
+            
+            # CRITICAL: Ensure both tool_call_id and name are always present for tool messages
+            if "tool_call_id" not in message or not message["tool_call_id"]:
+                message["tool_call_id"] = "fallback_call_id"
+                logger.warning(f"Tool message missing tool_call_id, using fallback")
+            
+            if "name" not in message or not message["name"] or str(message["name"]).strip() == '':
+                message["name"] = "fallback_function"
+                logger.error(f"Tool message missing name field after all checks, using fallback")
+            
+            # Debug logging for Gemini compatibility
+            logger.info(f"Tool message created - role: {self.role}, tool_call_id: '{message.get('tool_call_id')}', name: '{message.get('name')}', content_length: {len(self.content)}")
         
         return message
 
@@ -624,14 +642,26 @@ class FinancialAgent:
                     else:
                         tool_content = f"Error: {result.error}"
                     
-                    # Get function name for proper Gemini formatting
-                    function_name = tool_call.get('function', {}).get('name', 'unknown_function')
+                    # Get function name for proper Gemini formatting - ensure it's never empty
+                    function_name = tool_call.get('function', {}).get('name')
+                    if not function_name or str(function_name).strip() == '':
+                        function_name = 'unknown_function'
+                        logger.warning(f"Tool call missing function name, using fallback: {function_name}")
+                    
+                    # Get tool call ID - ensure it's never empty
+                    tool_call_id = tool_call.get('id')
+                    if not tool_call_id or str(tool_call_id).strip() == '':
+                        tool_call_id = 'unknown_call_id'
+                        logger.warning(f"Tool call missing ID, using fallback: {tool_call_id}")
+                    
+                    # Debug logging to track function names
+                    logger.info(f"Creating tool response - function_name: '{function_name}', tool_call_id: '{tool_call_id}', success: {result.success}")
                     
                     self.conversation_history.append(
                         ConversationMessage(
                             role="tool",
                             content=tool_content,
-                            tool_call_id=tool_call["id"],
+                            tool_call_id=tool_call_id,
                             function_name=function_name  # Add function name for Gemini compatibility
                         )
                     )

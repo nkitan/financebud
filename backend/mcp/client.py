@@ -663,7 +663,7 @@ class MCPManager:
         # Financial data server configuration
         financial_config = MCPServerConfig(
             name="financial-data-inr",
-            command="/home/notroot/Work/financebud/venv/bin/python",
+            command="/home/notroot/Work/financebud/.venv/bin/python",
             args=["/home/notroot/Work/financebud/mcp_server.py"],
             working_dir="/home/notroot/Work/financebud",
             max_retries=3,

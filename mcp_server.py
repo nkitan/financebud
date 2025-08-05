@@ -495,7 +495,7 @@ def find_recurring_payments(min_occurrences: int = 3, days_back: int = 90) -> st
         
         result = db_manager.execute_query(
             """
-            WITH recurring_candidates AS (
+            WITH transaction_intervals AS (
                 SELECT 
                     CASE 
                         WHEN beneficiary_name IS NOT NULL AND LENGTH(beneficiary_name) > 3 
@@ -503,28 +503,32 @@ def find_recurring_payments(min_occurrences: int = 3, days_back: int = 90) -> st
                         ELSE SUBSTR(description, 1, 30)
                     END as payee,
                     ROUND(debit_amount, 2) as amount,
-                    COUNT(*) as frequency,
-                    MIN(transaction_date) as first_seen,
-                    MAX(transaction_date) as last_seen,
-                    AVG(julianday(transaction_date) - julianday(LAG(transaction_date) OVER (PARTITION BY 
-                        CASE 
-                            WHEN beneficiary_name IS NOT NULL AND LENGTH(beneficiary_name) > 3 
-                            THEN beneficiary_name
-                            ELSE SUBSTR(description, 1, 30)
-                        END, 
-                        ROUND(debit_amount, 2) 
-                        ORDER BY transaction_date))) as avg_days_between
+                    transaction_date,
+                    julianday(transaction_date) - julianday(LAG(transaction_date) OVER (
+                        PARTITION BY 
+                            CASE 
+                                WHEN beneficiary_name IS NOT NULL AND LENGTH(beneficiary_name) > 3 
+                                THEN beneficiary_name
+                                ELSE SUBSTR(description, 1, 30)
+                            END, 
+                            ROUND(debit_amount, 2) 
+                        ORDER BY transaction_date
+                    )) as days_between
                 FROM transactions 
                 WHERE debit_amount IS NOT NULL 
                     AND debit_amount > 100  -- Filter out small transactions
                     AND transaction_date >= ?
-                GROUP BY 
-                    CASE 
-                        WHEN beneficiary_name IS NOT NULL AND LENGTH(beneficiary_name) > 3 
-                        THEN beneficiary_name
-                        ELSE SUBSTR(description, 1, 30)
-                    END,
-                    ROUND(debit_amount, 2)
+            ),
+            recurring_candidates AS (
+                SELECT 
+                    payee,
+                    amount,
+                    COUNT(*) as frequency,
+                    MIN(transaction_date) as first_seen,
+                    MAX(transaction_date) as last_seen,
+                    AVG(days_between) as avg_days_between
+                FROM transaction_intervals
+                GROUP BY payee, amount
                 HAVING COUNT(*) >= ?
                     AND julianday(MAX(transaction_date)) - julianday(MIN(transaction_date)) >= 14  -- At least 2 weeks apart
             )
