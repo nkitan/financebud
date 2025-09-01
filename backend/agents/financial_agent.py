@@ -31,7 +31,7 @@ from pydantic import BaseModel, Field, validator
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from cachetools import TTLCache, LRUCache
 import structlog
-from prometheus_client import Counter, Histogram, Gauge, start_http_server
+from prometheus_client import Counter, Histogram, Gauge, start_http_server, REGISTRY
 
 # Internal imports
 from backend.config.settings import get_settings
@@ -42,16 +42,67 @@ from backend.agents.llm_providers import (
     create_provider, get_default_config
 )
 from backend.logging_config import get_logger_with_context
+# Backwards-compatible exports of common tools
+from backend.agents.financial_tools import (
+    get_account_summary_tool,
+    get_recent_transactions_tool,
+    search_transactions_tool,
+    find_recurring_payments_tool,
+    get_transactions_by_date_range_tool,
+    get_monthly_summary_tool,
+    get_spending_by_category_tool,
+    analyze_spending_trends_tool,
+    execute_custom_query_tool,
+    get_database_schema_tool
+)
 
 # Configuration
 settings = get_settings()
 logger = get_logger_with_context(__name__)
 
-# Prometheus metrics
-tool_calls_total = Counter('financebud_tool_calls_total', 'Total tool calls', ['tool_name', 'status'])
-query_duration = Histogram('financebud_query_duration_seconds', 'Query execution time')
-active_sessions = Gauge('financebud_active_sessions', 'Number of active sessions')
-llm_requests_total = Counter('financebud_llm_requests_total', 'Total LLM requests', ['provider', 'status'])
+def _get_or_create_counter(name: str, documentation: str, labelnames: Optional[List[str]] = None):
+    """Get existing counter from registry or create a new one safely."""
+    # prometheus_client doesn't expose a direct lookup by name in a friendly way,
+    # but attempting to create a duplicate will raise; handle that.
+    try:
+        if labelnames:
+            return Counter(name, documentation, labelnames)
+        return Counter(name, documentation)
+    except ValueError:
+        # Collector with this name already registered; fetch from registry
+        for collector in REGISTRY.collectors:
+            # collector may not have 'name' attribute; guard access
+            if getattr(collector, 'name', None) == name:
+                return collector
+        # Fallback: raise original
+        raise
+
+
+def _get_or_create_histogram(name: str, documentation: str):
+    try:
+        return Histogram(name, documentation)
+    except ValueError:
+        for collector in REGISTRY.collectors:
+            if getattr(collector, 'name', None) == name:
+                return collector
+        raise
+
+
+def _get_or_create_gauge(name: str, documentation: str):
+    try:
+        return Gauge(name, documentation)
+    except ValueError:
+        for collector in REGISTRY.collectors:
+            if getattr(collector, 'name', None) == name:
+                return collector
+        raise
+
+
+# Prometheus metrics (created safely to avoid duplicate registration in tests)
+tool_calls_total = _get_or_create_counter('financebud_tool_calls_total', 'Total tool calls', ['tool_name', 'status'])
+query_duration = _get_or_create_histogram('financebud_query_duration_seconds', 'Query execution time')
+active_sessions = _get_or_create_gauge('financebud_active_sessions', 'Number of active sessions')
+llm_requests_total = _get_or_create_counter('financebud_llm_requests_total', 'Total LLM requests', ['provider', 'status'])
 
 
 class SessionState(str, Enum):
@@ -103,7 +154,8 @@ class ToolCallResult:
 class ConversationMessage(BaseModel):
     """Conversation message with validation."""
     role: str = Field(..., pattern=r'^(system|user|assistant|tool)$')
-    content: str = Field(..., min_length=1)
+    # Allow empty content for assistant/tool messages coming from LLM providers
+    content: str = Field(..., min_length=0)
     tool_calls: Optional[List[Dict[str, Any]]] = None
     tool_call_id: Optional[str] = None
     function_name: Optional[str] = None
@@ -144,7 +196,9 @@ class SessionManager:
         self._sessions: Dict[str, 'FinancialAgent'] = {}
         self._session_stats: Dict[str, Dict[str, Any]] = {}
         self._cleanup_task: Optional[asyncio.Task] = None
-        self._start_cleanup_task()
+    # Do not start background asyncio tasks at import time. Defer starting
+    # the cleanup task until an event loop is available by calling
+    # `start_cleanup_task()` from runtime code or when a loop is running.
     
     def create_session(self, session_id: Optional[str] = None, **kwargs) -> str:
         """Create a new agent session."""
@@ -191,6 +245,22 @@ class SessionManager:
         """Start background cleanup task."""
         if self._cleanup_task is None or self._cleanup_task.done():
             self._cleanup_task = asyncio.create_task(self._cleanup_inactive_sessions())
+
+    def start_cleanup_task(self):
+        """Public method to start the cleanup task when an asyncio loop is running.
+
+        This is safe to call from runtime code (e.g., when the application starts up).
+        """
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # No running loop; do not start task now.
+            logger.debug("No running event loop; cleanup task start deferred")
+            return
+
+        # If we have a running loop, ensure the task is scheduled
+        if self._cleanup_task is None or self._cleanup_task.done():
+            self._cleanup_task = loop.create_task(self._cleanup_inactive_sessions())
     
     async def _cleanup_inactive_sessions(self):
         """Clean up inactive sessions periodically."""
@@ -926,6 +996,24 @@ Timestamp: {datetime.now().isoformat()}"""
             "tool_metrics": tool_metrics,
             **self.metrics
         }
+
+    # Backwards-compatible alias for older callers
+    def get_metrics(self) -> Dict[str, Any]:
+        """Compatibility wrapper returning session metrics (alias)."""
+        return self.get_session_metrics()
+
+    def get_last_tools_used(self, limit: int = 5) -> List[str]:
+        """Return the last N tool names used in this session, most recent first."""
+        tools = []
+        # Walk conversation history backwards and collect tool message function_names
+        for msg in reversed(self.conversation_history):
+            if getattr(msg, 'role', '') == 'tool':
+                name = getattr(msg, 'function_name', None) or msg.metadata.get('function_name') if isinstance(msg.metadata, dict) else None
+                if name and name not in tools:
+                    tools.append(name)
+            if len(tools) >= limit:
+                break
+        return tools
     
     def get_health_status(self) -> Dict[str, Any]:
         """Get agent health status."""
@@ -1007,6 +1095,11 @@ async def get_financial_agent(
             user_id=user_id
         )
         await _global_agent.initialize()
+        # Ensure background cleanup task is started now that an event loop is running
+        try:
+            session_manager.start_cleanup_task()
+        except Exception:
+            logger.debug("Failed to start session cleanup task during agent initialization")
     
     return _global_agent
 
