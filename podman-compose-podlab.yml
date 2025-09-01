@@ -1,0 +1,27 @@
+services:
+  backend:
+    build:
+      context: /mounts/financebud
+      dockerfile_inline: |
+        FROM python:3.11-slim
+        WORKDIR /app
+        COPY requirements.txt .
+        RUN pip install --no-cache-dir -r requirements.txt
+    ports:
+      - "8001:8000"
+    env_file:
+      - stack.env
+    environment:
+      - DATABASE_PATH=/app/financial_data.db
+      - STATEMENTS_DIR=/app/Bank-Statements
+      - APP_HOME=/app
+    command: sh -c "python3 consolidate_statements.py && python -m uvicorn backend.main:app --host 0.0.0.0 --port 8000"
+    volumes:
+      - /home/notroot/Work/podlab/data/mounts/financebud/:/app
+
+  frontend:
+    image: nginx:alpine
+    ports:
+      - "8081:80"
+    volumes:
+      - /home/notroot/Work/podlab/data/mounts/financebud/frontend:/usr/share/nginx/html:ro

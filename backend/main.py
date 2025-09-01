@@ -505,9 +505,11 @@ if __name__ == "__main__":
             "*.pyo",
             ".git",
             "venv",
+            ".venv",
             "Bank-Statements",
             "tests",
             "frontend"
         ],
         log_level="info"
     )
+

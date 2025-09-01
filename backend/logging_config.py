@@ -232,7 +232,7 @@ def setup_logging(log_level: str = "INFO", log_dir: str = "logs") -> None:
 
 def get_logger_with_context(name: str) -> ContextLogger:
     """
-    Get a logger with enhanced context capabilities.
+    Get a logger with context capabilities.
     
     Args:
         name: Logger name (usually __name__)
@@ -240,21 +240,21 @@ def get_logger_with_context(name: str) -> ContextLogger:
     Returns:
         ContextLogger with structured logging methods
     """
-    # Create and configure the enhanced logger
-    enhanced_logger = ContextLogger(name)
+    # Create and configure the logger
+    context_logger = ContextLogger(name)
     base_logger = logging.getLogger(name)
     
     # Set the same level as the base logger
-    enhanced_logger.setLevel(base_logger.level)
+    context_logger.setLevel(base_logger.level)
     
     # Copy handlers from the root logger if the base logger doesn't have any
     if not base_logger.handlers:
         root_logger = logging.getLogger()
-        enhanced_logger.handlers = root_logger.handlers[:]
+        context_logger.handlers = root_logger.handlers[:]
     else:
-        enhanced_logger.handlers = base_logger.handlers[:]
+        context_logger.handlers = base_logger.handlers[:]
     
     # Enable propagation so messages go to parent loggers
-    enhanced_logger.propagate = True
+    context_logger.propagate = True
     
-    return enhanced_logger
+    return context_logger

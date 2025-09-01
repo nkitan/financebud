@@ -308,7 +308,7 @@
                 
                 // Settings
                 settings: {
-                    apiBaseUrl: 'http://localhost:8000',
+                    apiBaseUrl: '',
                     sessionId: 'default-session',
                     useWebSocket: true
                 },
@@ -477,7 +477,7 @@
 
                 // UI Helpers
                 formatMessage(content) {
-                    // Enhanced formatting for better display
+                    // formatting for better display
                     return content
                         .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
                         .replace(/\*(.*?)\*/g, '<em>$1</em>')

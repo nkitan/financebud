@@ -1,0 +1,40 @@
+
+# This podman-compose file runs the main services of the FinanceBud application.
+#
+# It includes:
+# - backend: The FastAPI application that serves the API.
+# - mcp-server: The Model Context Protocol server for financial tools. This is started
+#               automatically by the backend service.
+# - frontend: A dedicated service to serve the static frontend files.
+#
+# To run all services:
+# podman-compose up --build
+#
+# Access the application:
+# - Frontend: http://localhost:8080
+# - Backend API: http://localhost:8000
+services:
+  backend:
+    build:
+      context: .
+      dockerfile_inline: |
+        FROM python:3.11-slim
+        WORKDIR /app
+        COPY requirements.txt .
+        RUN pip install --no-cache-dir -r requirements.txt
+        COPY . .
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    command: python -m uvicorn backend.main:app --host 0.0.0.0 --port 8000
+    # The backend service also starts the mcp_server.py as a subprocess.
+
+  frontend:
+    # The frontend service uses a lightweight nginx server to serve the static
+    # HTML, CSS, and JavaScript files from the 'frontend' directory.
+    image: nginx:alpine
+    ports:
+      - "8080:80"
+    volumes:
+      - ./frontend:/usr/share/nginx/html:ro

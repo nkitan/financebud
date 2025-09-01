@@ -96,10 +96,11 @@ class OllamaProvider(LLMProvider):
         
         # Set longer timeouts for complex tool processing
         timeout = self.config.timeout
+        # Cap Gemini timeouts more aggressively to avoid long waits
         if tools and len(tools) > 0:
-            timeout = min(timeout, 300)  # Max 5 minutes when processing with tools
+            timeout = min(timeout, 180)  # Max 3 minutes when processing with tools
         else:
-            timeout = min(timeout, 300)  # Max 5 minutes for regular chat
+            timeout = min(timeout, 60)   # Max 60s for regular chat
         
         payload = {
             "model": self.config.model,
@@ -286,7 +287,6 @@ class GeminiProvider(LLMProvider):
         # Use the correct OpenAI-compatible endpoint for Gemini
         # The base URL should already include the path, so we just append the chat completions endpoint
         self.chat_url = f"{config.base_url}/chat/completions"
-        print(self.chat_url, config.api_key)
         self.headers = {
             "Authorization": f"Bearer {config.api_key}",
             "Content-Type": "application/json"
@@ -304,39 +304,39 @@ class GeminiProvider(LLMProvider):
         # Log the chat request
         logger.log_chat_request(messages, session_id=f"gemini_{self.config.model}")
         
-        # Validate messages for Gemini compatibility - check for empty function names
+        # Validate messages for Gemini compatibility - ensure tool responses always have name and tool_call_id
         validated_messages = []
         for i, msg in enumerate(messages):
             if msg.get("role") == "tool":
-                # Ensure tool messages have a proper name field
-                msg_copy = msg.copy()  # Don't modify original
-                
-                # Check and fix name field with more robust validation
+                # Ensure tool messages have a proper name and tool_call_id
+                msg_copy = dict(msg)  # shallow copy; do not mutate original
+
+                # Normalize to strings
                 name_value = msg_copy.get("name")
-                if not name_value or not isinstance(name_value, str) or str(name_value).strip() == "":
-                    logger.warning(f"Tool message {i} missing or invalid name field. Original: {name_value}, Full msg: {msg}")
+                tool_call_id_value = msg_copy.get("tool_call_id")
+
+                # Fix name
+                if not isinstance(name_value, str) or not name_value.strip():
+                    logger.warning(f"Tool message {i} missing/invalid name. Original: {name_value}")
                     msg_copy["name"] = f"fallback_function_{i}"
-                
-                # Also ensure tool_call_id is present for tool messages
-                tool_call_id = msg_copy.get("tool_call_id")
-                if not tool_call_id or not isinstance(tool_call_id, str) or str(tool_call_id).strip() == "":
-                    logger.warning(f"Tool message {i} missing or invalid tool_call_id. Original: {tool_call_id}")
+
+                # Fix tool_call_id
+                if not isinstance(tool_call_id_value, str) or not str(tool_call_id_value).strip():
+                    logger.warning(f"Tool message {i} missing/invalid tool_call_id. Original: {tool_call_id_value}")
                     msg_copy["tool_call_id"] = f"fallback_call_{i}"
-                
-                # Final validation to ensure both fields are non-empty strings
-                final_name = str(msg_copy.get("name", "")).strip()
-                final_tool_call_id = str(msg_copy.get("tool_call_id", "")).strip()
-                
-                if not final_name:
+
+                # Final guard
+                if not str(msg_copy.get("name", "")).strip():
                     msg_copy["name"] = f"emergency_function_{i}"
-                    logger.error(f"Tool message {i} name still empty after validation, using emergency fallback")
-                
-                if not final_tool_call_id:
+                    logger.error(f"Tool message {i} name empty after validation; using emergency fallback")
+                if not str(msg_copy.get("tool_call_id", "")).strip():
                     msg_copy["tool_call_id"] = f"emergency_call_{i}"
-                    logger.error(f"Tool message {i} tool_call_id still empty after validation, using emergency fallback")
-                
+                    logger.error(f"Tool message {i} tool_call_id empty after validation; using emergency fallback")
+
                 validated_messages.append(msg_copy)
-                logger.info(f"Final validated tool message {i}: name='{msg_copy.get('name')}', tool_call_id='{msg_copy.get('tool_call_id')}'")
+                logger.info(
+                    f"Validated tool message {i}: name='{msg_copy.get('name')}', tool_call_id='{msg_copy.get('tool_call_id')}'"
+                )
             else:
                 validated_messages.append(msg)
         
@@ -382,7 +382,7 @@ class GeminiProvider(LLMProvider):
                     self.chat_url,
                     json=payload,
                     headers=self.headers,
-                    timeout=aiohttp.ClientTimeout(total=timeout)
+                    timeout=aiohttp.ClientTimeout(total=timeout, connect=10, sock_connect=10, sock_read=timeout)
                 ) as response:
                     if response.status == 200:
                         result = await response.json()
@@ -420,7 +420,46 @@ class GeminiProvider(LLMProvider):
                         execution_time = time.time() - start_time
                         error_text = await response.text()
                         error_msg = f"Gemini returned status {response.status}: {error_text}"
-                        
+
+                        # If Gemini complains about empty function_response.name despite our validations,
+                        # fallback by transforming tool messages into assistant content so we can proceed.
+                        if "function_response.name: Name cannot be empty" in error_text:
+                            try:
+                                # Transform last tool message into assistant content block
+                                transformed = []
+                                for msg in validated_messages:
+                                    if msg.get("role") == "tool":
+                                        content = msg.get("content", "")
+                                        tool_name = msg.get("name", "tool")
+                                        transformed.append({
+                                            "role": "assistant",
+                                            "content": f"Tool {tool_name} result: {content[:150]}"
+                                        })
+                                    else:
+                                        transformed.append(msg)
+                                alt_payload = {
+                                    "model": self.config.model,
+                                    "messages": transformed,
+                                    "max_tokens": self.config.max_tokens,
+                                    "temperature": self.config.temperature
+                                }
+                                logger.warning("Gemini name error encountered; retrying with tool messages transformed to assistant content")
+                                async with aiohttp.ClientSession() as session2:
+                                    async with session2.post(
+                                        self.chat_url,
+                                        json=alt_payload,
+                                        headers=self.headers,
+                                        timeout=aiohttp.ClientTimeout(total=timeout)
+                                    ) as resp2:
+                                        if resp2.status == 200:
+                                            result2 = await resp2.json()
+                                            logger.info("Fallback succeeded with transformed tool messages")
+                                            return result2
+                                        else:
+                                            logger.error(f"Fallback also failed with status {resp2.status}: {await resp2.text()}")
+                            except Exception as fe:
+                                logger.error(f"Fallback transform failed: {fe}")
+
                         # Log the request payload that caused the error for debugging
                         logger.debug(f"Gemini request payload that caused error: {json.dumps(payload, indent=2)}")
                         
@@ -584,24 +623,24 @@ def get_default_config() -> LLMConfig:
     # Default configurations for different providers
     defaults = {
         ProviderType.OLLAMA: {
-            "base_url": os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
-            "model": os.getenv("OLLAMA_MODEL", "llama3.1"),
+            "base_url": os.getenv("LLM_OLLAMA_BASE_URL", "http://localhost:11434"),
+            "model": os.getenv("LLM_OLLAMA_MODEL", "llama3.1"),
             "api_key": None
         },
         ProviderType.OPENAI: {
             "base_url": os.getenv("OPENAI_BASE_URL", "https://api.openai.com"),
-            "model": os.getenv("OPENAI_MODEL", "gpt-4"),
-            "api_key": os.getenv("OPENAI_API_KEY", "your_api_key_here")
+            "model": os.getenv("LLM_OPENAI_MODEL", "gpt-4o"),
+            "api_key": os.getenv("LLM_OPENAI_API_KEY", "your_api_key_here")
         },
         ProviderType.GEMINI: {
-            "base_url": os.getenv("GEMINI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai"),
-            "model": os.getenv("GEMINI_MODEL", "gemini-2.5-flash"),
-            "api_key": os.getenv("GEMINI_API_KEY", "your_api_key_here")
+            "base_url": os.getenv("LLM_GEMINI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/models"),
+            "model": os.getenv("LLM_GEMINI_MODEL", "gemini-2.5-flash"),
+            "api_key": os.getenv("LLM_GEMINI_API_KEY", "your_api_key_here")
         },
         ProviderType.OPENROUTER: {
-            "base_url": os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api"),
-            "model": os.getenv("OPENROUTER_MODEL", "anthropic/claude-3-sonnet"),
-            "api_key": os.getenv("OPENROUTER_API_KEY", "your_api_key_here")
+            "base_url": os.getenv("LLM_OPENROUTER_BASE_URL", "https://openrouter.ai/api"),
+            "model": os.getenv("LLM_OPENROUTER_MODEL", "anthropic/claude-4-sonnet"),
+            "api_key": os.getenv("LLM_OPENROUTER_API_KEY", "your_api_key_here")
         }
     }
     

@@ -17,7 +17,7 @@
 - **Streamlined Architecture**: Simplified file structure with no legacy components
 - **Modern FastAPI**: Latest async/await patterns throughout
 
-#### Enhanced Database Layer
+#### Database Layer
 - **Connection Pooling**: Configurable pool size with automatic connection management
 - **Query Caching**: Smart caching with automatic cleanup and TTL management
 - **WAL Mode**: Write-Ahead Logging for better concurrency
@@ -42,9 +42,9 @@
 | Process Count | 5-8 processes | 2-3 processes | 60% reduction |
 | Database Connections | 1 per query | Pooled (max 10) | 80% reduction |
 
-### 🛠️ Technical Enhancements
+### 🛠️ Technical Details
 
-#### Backend System (`backend/`)
+#### Backend
 ```
 backend/
 ├── main.py                     # High-performance FastAPI server
@@ -84,7 +84,7 @@ python -m backend.main        # Start backend
 python mcp_server.py          # Start MCP server (separate terminal)
 ```
 
-#### Enhanced Testing
+#### Testing
 ```bash
 # Comprehensive test suite
 python tests/test_production.py    # Full system tests
@@ -104,21 +104,21 @@ python tests/test_tool_support.py  # Tool functionality tests
 - **Connection Management**: Automatic reconnection handling
 - **Broadcast Capability**: Multi-client support ready
 
-#### Advanced Financial Tools
+#### Financial Tools
 - **Custom SQL Queries**: Direct database access for power users
 - **Trend Analysis**: Multi-month spending pattern analysis
 - **Recurring Payment Detection**: Automatic subscription tracking
 - **UPI Analytics**: Specialized analysis for Indian payment systems
 
-#### Multi-Provider LLM Support
+#### LLM Support
 - **Ollama**: Complete privacy with local models
 - **OpenAI**: GPT-4o family for fastest responses
 - **Google Gemini**: Large context windows for complex analysis
 - **OpenRouter**: Access to Claude, Llama, and other models
 
-### 📊 Database Enhancements
+### 📊 Database Details
 
-#### Optimized Schema
+#### Schema
 - **Efficient Indexes**: Fast query execution on all common operations
 - **Connection Pooling**: Thread-safe, reusable connections
 - **Query Cache**: LRU cache with configurable TTL
@@ -155,30 +155,7 @@ FINANCIAL_AGENT_PROVIDER=ollama  # ollama|openai|gemini|openrouter
 
 ---
 
-## v2.0 - Multi-Provider LLM Support (July 2025)
 
-### 🚀 Major Updates
-
-#### Multi-Provider LLM Support Added
-- **Provider Independence**: Support for Ollama, OpenAI, Gemini, OpenRouter
-- **Unified Interface**: OpenAI-compatible API everywhere
-- **Easy Switching**: Environment-based provider configuration
-- **Cost Flexibility**: Choose providers based on budget and privacy needs
-
-#### Backend Modernization
-- **Generic Financial Agent**: Replaced LM Studio-specific implementation
-- **Provider Abstraction**: Clean separation of LLM provider logic
-- **Configuration Management**: Centralized config system
-- **Error Handling**: Robust error recovery and logging
-
-### 🔄 Migration from v1.0
-
-If upgrading from v1.0:
-1. **Configuration**: Update `.env` file with new provider system
-2. **Setup**: Run `./setup_multi_provider.sh` for automated setup  
-3. **Testing**: Validate with `python tests/test_providers.py`
-
----
 
 ## v1.0 - Initial Release (June 2025)
 

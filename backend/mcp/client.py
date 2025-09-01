@@ -18,6 +18,7 @@ Key features:
 import asyncio
 import json
 import logging
+import os
 import subprocess
 import signal
 import time
@@ -659,20 +660,24 @@ class MCPManager:
         """Initialize default MCP servers with optimized settings."""
         if self.initialized:
             return
-        
+
+        app_home = os.environ.get("APP_HOME", "/app")
+        python_executable = "/usr/local/bin/python"
+        mcp_server_script = os.path.join(app_home, "mcp_server.py")
+
         # Financial data server configuration
         financial_config = MCPServerConfig(
             name="financial-data-inr",
-            command="/home/notroot/Work/financebud/.venv/bin/python",
-            args=["/home/notroot/Work/financebud/mcp_server.py"],
-            working_dir="/home/notroot/Work/financebud",
+            command=python_executable,
+            args=[mcp_server_script],
+            working_dir=app_home,
             max_retries=3,
             retry_delay=1.0,
             health_check_interval=60.0,  # Check every minute
             request_timeout=15.0,  # Faster timeout for financial queries
             auto_reconnect=True
         )
-        
+
         if Path(financial_config.args[0]).exists():
             success = await self.add_server(financial_config)
             if success:
@@ -681,7 +686,7 @@ class MCPManager:
                 logger.error("❌ Failed to initialize persistent financial data MCP server")
         else:
             logger.error(f"❌ Financial data server script not found at {financial_config.args[0]}")
-        
+
         self.initialized = True
     
     async def health_check(self) -> Dict[str, Any]:

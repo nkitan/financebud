@@ -579,8 +579,8 @@ class BankStatementConsolidator:
 
 def main():
     """Main function to run the consolidation."""
-    statements_dir = "/home/notroot/Work/financebud/Bank-Statements"
-    db_path = "/home/notroot/Work/financebud/financial_data.db"
+    statements_dir = os.getenv("STATEMENTS_DIR", "Bank-Statements")
+    db_path = os.getenv("DATABASE_PATH", "financial_data.db")
     
     with BankStatementConsolidator(statements_dir, db_path) as consolidator:
         # Consolidate all statements

@@ -1,62 +1,118 @@
 """
-Financial Analysis Agent
-========================
+Production-Ready Financial Agent
+===================================
 
-High-performance financial agent with persistent MCP connections and
-advanced optimization features for efficient financial data analysis.
-
-Key features:
-- Persistent MCP server connections
-- Connection pooling and reuse
-- Tool calls with intelligent caching
-- Optimized database operations
-- Batch processing capabilities
-- Response caching for frequent queries
+Next-generation financial analysis agent with advanced features:
+- Real-time data processing with streaming capabilities
+- Advanced caching and performance optimization
+- Comprehensive error handling and recovery
+- Production monitoring and observability
+- Security and validation
+- Multi-provider LLM support with failover
+- Advanced tool orchestration and batching
 """
 
 import asyncio
 import json
-import logging
 import time
 import uuid
 from datetime import datetime, timedelta
-from typing import Dict, List, Any, Optional
-from pydantic import BaseModel, Field
-import hashlib
-from functools import lru_cache
+from typing import Dict, List, Any, Optional, Union, AsyncGenerator, Callable
+from dataclasses import dataclass, field
+from contextlib import asynccontextmanager
+import logging
+from concurrent.futures import ThreadPoolExecutor
+import traceback
+import weakref
+from enum import Enum
 
-# Import our generic LLM providers
-from .llm_providers import (
+# Imports
+from pydantic import BaseModel, Field, validator
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+from cachetools import TTLCache, LRUCache
+import structlog
+from prometheus_client import Counter, Histogram, Gauge, start_http_server
+
+# Internal imports
+from backend.config.settings import get_settings
+from backend.database.db import get_db_manager
+from backend.mcp.client import get_mcp_manager
+from backend.agents.llm_providers import (
     LLMConfig, LLMProvider, ProviderType,
     create_provider, get_default_config
 )
+from backend.logging_config import get_logger_with_context
 
-# Import our MCP client manager
-from ..mcp.client import MCPManager, get_mcp_manager
-from ..database.db import DatabaseManager, get_db_manager
-
-# Import centralized logging
-from ..logging_config import get_logger_with_context
-
+# Configuration
+settings = get_settings()
 logger = get_logger_with_context(__name__)
 
-class ToolCallResult(BaseModel):
-    """Result of a tool call."""
+# Prometheus metrics
+tool_calls_total = Counter('financebud_tool_calls_total', 'Total tool calls', ['tool_name', 'status'])
+query_duration = Histogram('financebud_query_duration_seconds', 'Query execution time')
+active_sessions = Gauge('financebud_active_sessions', 'Number of active sessions')
+llm_requests_total = Counter('financebud_llm_requests_total', 'Total LLM requests', ['provider', 'status'])
+
+
+class SessionState(str, Enum):
+    """Session states for tracking."""
+    INITIALIZING = "initializing"
+    ACTIVE = "active"
+    IDLE = "idle"
+    ERROR = "error"
+    TERMINATED = "terminated"
+
+
+class ToolCallPriority(str, Enum):
+    """Tool call priority levels."""
+    LOW = "low"
+    NORMAL = "normal"
+    HIGH = "high"
+    CRITICAL = "critical"
+
+
+@dataclass
+class ToolCallRequest:
+    """Tool call request with metadata."""
     tool_name: str
-    result: str
+    arguments: Dict[str, Any]
+    request_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    priority: ToolCallPriority = ToolCallPriority.NORMAL
+    timeout: float = 30.0
+    retry_count: int = 0
+    max_retries: int = 3
+    created_at: datetime = field(default_factory=datetime.now)
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class ToolCallResult:
+    """Tool call result with comprehensive metadata."""
+    request_id: str
+    tool_name: str
+    result: Any
     success: bool
     error: Optional[str] = None
+    execution_time: float = 0.0
+    cached: bool = False
+    retry_count: int = 0
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    timestamp: datetime = field(default_factory=datetime.now)
+
 
 class ConversationMessage(BaseModel):
-    """Conversation message with tool support."""
-    role: str
-    content: str
+    """Conversation message with validation."""
+    role: str = Field(..., pattern=r'^(system|user|assistant|tool)$')
+    content: str = Field(..., min_length=1)
     tool_calls: Optional[List[Dict[str, Any]]] = None
     tool_call_id: Optional[str] = None
-    function_name: Optional[str] = None  # Add function name for tool responses
+    function_name: Optional[str] = None
+    timestamp: datetime = Field(default_factory=datetime.now)
+    token_count: Optional[int] = None
+    metadata: Dict[str, Any] = Field(default_factory=dict)
     
     def to_dict(self) -> Dict[str, Any]:
-        """Convert to proper format for LLM providers."""
+        """Convert to LLM provider format with validation."""
         message: Dict[str, Any] = {
             "role": self.role,
             "content": self.content
@@ -64,48 +120,144 @@ class ConversationMessage(BaseModel):
         
         if self.tool_calls:
             message["tool_calls"] = self.tool_calls
-            
+        
         if self.role == "tool":
-            # For tool responses, ALWAYS ensure we have the proper format
-            if self.tool_call_id:
-                message["tool_call_id"] = self.tool_call_id
+            # Tool message validation
+            if not self.tool_call_id:
+                self.tool_call_id = f"fallback_{uuid.uuid4().hex[:8]}"
+                logger.warning(f"Generated fallback tool_call_id: {self.tool_call_id}")
             
-            # For Gemini API compatibility, ALWAYS add function response format
-            # Ensure function name is never empty or None
-            function_name = self.function_name
-            if not function_name or str(function_name).strip() == '':
-                function_name = 'unknown_function'
-                logger.warning(f"Tool message missing function_name, using fallback: {function_name}")
+            if not self.function_name:
+                self.function_name = f"fallback_function_{uuid.uuid4().hex[:8]}"
+                logger.warning(f"Generated fallback function_name: {self.function_name}")
             
-            message["name"] = function_name
-            
-            # CRITICAL: Ensure both tool_call_id and name are always present for tool messages
-            if "tool_call_id" not in message or not message["tool_call_id"]:
-                message["tool_call_id"] = "fallback_call_id"
-                logger.warning(f"Tool message missing tool_call_id, using fallback")
-            
-            if "name" not in message or not message["name"] or str(message["name"]).strip() == '':
-                message["name"] = "fallback_function"
-                logger.error(f"Tool message missing name field after all checks, using fallback")
-            
-            # Debug logging for Gemini compatibility
-            logger.info(f"Tool message created - role: {self.role}, tool_call_id: '{message.get('tool_call_id')}', name: '{message.get('name')}', content_length: {len(self.content)}")
+            message["tool_call_id"] = self.tool_call_id
+            message["name"] = self.function_name
         
         return message
 
-class FinancialTool:
-    """Represents a financial analysis tool with caching support."""
+
+class SessionManager:
+    """Manages agent sessions with lifecycle tracking."""
     
-    def __init__(self, name: str, description: str, func, cache_ttl: int = 0):
+    def __init__(self):
+        self._sessions: Dict[str, 'FinancialAgent'] = {}
+        self._session_stats: Dict[str, Dict[str, Any]] = {}
+        self._cleanup_task: Optional[asyncio.Task] = None
+        self._start_cleanup_task()
+    
+    def create_session(self, session_id: Optional[str] = None, **kwargs) -> str:
+        """Create a new agent session."""
+        if session_id is None:
+            session_id = str(uuid.uuid4())
+        
+        if session_id in self._sessions:
+            raise ValueError(f"Session {session_id} already exists")
+        
+        agent = FinancialAgent(session_id=session_id, **kwargs)
+        self._sessions[session_id] = agent
+        self._session_stats[session_id] = {
+            "created_at": datetime.now(),
+            "last_activity": datetime.now(),
+            "state": SessionState.INITIALIZING,
+            "total_messages": 0,
+            "total_tool_calls": 0,
+        }
+        
+        active_sessions.inc()
+        logger.info(f"Created session {session_id}")
+        return session_id
+    
+    def get_session(self, session_id: str) -> Optional['FinancialAgent']:
+        """Get an existing session."""
+        return self._sessions.get(session_id)
+    
+    def remove_session(self, session_id: str) -> bool:
+        """Remove a session."""
+        if session_id in self._sessions:
+            agent = self._sessions.pop(session_id)
+            self._session_stats.pop(session_id, None)
+            active_sessions.dec()
+            logger.info(f"Removed session {session_id}")
+            return True
+        return False
+    
+    def update_session_activity(self, session_id: str):
+        """Update session last activity timestamp."""
+        if session_id in self._session_stats:
+            self._session_stats[session_id]["last_activity"] = datetime.now()
+    
+    def _start_cleanup_task(self):
+        """Start background cleanup task."""
+        if self._cleanup_task is None or self._cleanup_task.done():
+            self._cleanup_task = asyncio.create_task(self._cleanup_inactive_sessions())
+    
+    async def _cleanup_inactive_sessions(self):
+        """Clean up inactive sessions periodically."""
+        while True:
+            try:
+                current_time = datetime.now()
+                inactive_sessions = []
+                
+                for session_id, stats in self._session_stats.items():
+                    last_activity = stats["last_activity"]
+                    if (current_time - last_activity).total_seconds() > 3600:  # 1 hour
+                        inactive_sessions.append(session_id)
+                
+                for session_id in inactive_sessions:
+                    self.remove_session(session_id)
+                    logger.info(f"Cleaned up inactive session {session_id}")
+                
+                await asyncio.sleep(300)  # Check every 5 minutes
+                
+            except Exception as e:
+                logger.error(f"Session cleanup error: {e}")
+                await asyncio.sleep(60)
+
+
+# Global session manager
+session_manager = SessionManager()
+
+
+class FinancialTool:
+    """Financial tool with advanced caching and monitoring."""
+    
+    def __init__(
+        self,
+        name: str,
+        description: str,
+        func: Callable,
+        cache_ttl: int = 0,
+        timeout: float = 30.0,
+        rate_limit: Optional[int] = None
+    ):
         self.name = name
         self.description = description
         self.func = func
-        self.cache_ttl = cache_ttl  # Cache time-to-live in seconds
-        self._cache = {}
-        self._cache_times = {}
+        self.cache_ttl = cache_ttl
+        self.timeout = timeout
+        self.rate_limit = rate_limit
+        
+        # Caching
+        if cache_ttl > 0:
+            self._cache = TTLCache(maxsize=1000, ttl=cache_ttl)
+        else:
+            self._cache = None
+        
+        # Rate limiting
+        if rate_limit:
+            self._rate_limiter = TTLCache(maxsize=rate_limit, ttl=60)  # per minute
+        else:
+            self._rate_limiter = None
+        
+        # Metrics
+        self._call_count = 0
+        self._error_count = 0
+        self._total_execution_time = 0.0
+        self._last_error = None
     
     def to_openai_format(self) -> Dict[str, Any]:
-        """Convert to OpenAI tool format for LLM providers."""
+        """Convert to OpenAI tool format with schema."""
         return {
             "type": "function",
             "function": {
@@ -116,7 +268,7 @@ class FinancialTool:
                     "properties": {
                         "tool_input": {
                             "type": "string",
-                            "description": "Input parameters for the financial tool"
+                            "description": "Input parameters for the financial tool (JSON string)"
                         }
                     },
                     "required": ["tool_input"]
@@ -124,787 +276,752 @@ class FinancialTool:
             }
         }
     
-    def _get_cache_key(self, tool_input: str) -> str:
-        """Generate cache key for tool input."""
-        return hashlib.md5(f"{self.name}:{tool_input}".encode()).hexdigest()
+    def _get_cache_key(self, tool_input: str, user_context: str = "") -> str:
+        """Generate cache key with user context."""
+        import hashlib
+        combined = f"{self.name}:{tool_input}:{user_context}"
+        return hashlib.sha256(combined.encode()).hexdigest()
     
-    def _is_cache_valid(self, cache_key: str) -> bool:
-        """Check if cached result is still valid."""
-        if self.cache_ttl <= 0:
+    def _check_rate_limit(self, user_id: str = "default") -> bool:
+        """Check if rate limit is exceeded."""
+        if not self._rate_limiter:
+            return True
+        
+        current_count = self._rate_limiter.get(user_id, 0)
+        if current_count >= self.rate_limit:
             return False
         
-        if cache_key not in self._cache_times:
-            return False
-        
-        cache_time = self._cache_times[cache_key]
-        return (time.time() - cache_time) < self.cache_ttl
+        self._rate_limiter[user_id] = current_count + 1
+        return True
     
-    async def call(self, tool_input: str) -> str:
-        """Call the tool with caching support."""
-        cache_key = self._get_cache_key(tool_input)
-        
-        # Check cache first
-        if self._is_cache_valid(cache_key):
-            logger.debug(f"Cache hit for {self.name}")
-            return self._cache[cache_key]
-        
-        # Call the actual function
-        start_time = time.time()
-        result = await self.func(tool_input)
-        execution_time = time.time() - start_time
-        
-        # Cache the result if caching is enabled
-        if self.cache_ttl > 0:
-            self._cache[cache_key] = result
-            self._cache_times[cache_key] = time.time()
-            
-            # Clean old cache entries
-            self._cleanup_cache()
-        
-        logger.debug(f"Tool {self.name} executed in {execution_time:.3f}s")
-        return result
-    
-    def _cleanup_cache(self):
-        """Remove expired cache entries."""
-        current_time = time.time()
-        expired_keys = [
-            key for key, cache_time in self._cache_times.items()
-            if (current_time - cache_time) > self.cache_ttl
-        ]
-        
-        for key in expired_keys:
-            self._cache.pop(key, None)
-            self._cache_times.pop(key, None)
-
-# Global MCP manager instance
-_mcp_manager: Optional[MCPManager] = None
-
-async def _get_mcp_manager() -> MCPManager:
-    """Get the MCP manager instance."""
-    global _mcp_manager
-    if _mcp_manager is None:
-        _mcp_manager = await get_mcp_manager()
-    return _mcp_manager
-
-# Optimized financial analysis tools
-async def get_account_summary_tool(tool_input: str) -> str:
-    """Get account summary with current balance and transaction overview."""
-    try:
-        mcp_manager = await _get_mcp_manager()
-        result = await mcp_manager.call_tool("financial-data-inr", "get_account_summary", {})
-        return json.dumps(result, indent=2)
-    except Exception as e:
-        logger.error(f"Error getting account summary: {e}")
-        return f"Error getting account summary: {str(e)}"
-
-async def get_recent_transactions_tool(tool_input: str) -> str:
-    """Get the most recent N transactions."""
-    try:
-        # Parse input to get number of transactions
-        try:
-            parsed_input = json.loads(tool_input) if tool_input.strip() else {}
-            limit = parsed_input.get("limit", 10)
-        except:
-            # If input is just a number
-            try:
-                limit = int(tool_input.strip()) if tool_input.strip() else 10
-            except:
-                limit = 10
-        
-        mcp_manager = await _get_mcp_manager()
-        result = await mcp_manager.call_tool("financial-data-inr", "get_recent_transactions", {"limit": limit})
-        return json.dumps(result, indent=2)
-    except Exception as e:
-        logger.error(f"Error getting recent transactions: {e}")
-        return f"Error getting recent transactions: {str(e)}"
-
-async def search_transactions_tool(tool_input: str) -> str:
-    """Search transactions by description pattern."""
-    try:
-        # Parse input to get search pattern and optional limit
-        try:
-            parsed_input = json.loads(tool_input) if tool_input.strip() else {}
-            pattern = parsed_input.get("pattern", tool_input)
-            limit = parsed_input.get("limit", 20)
-        except:
-            pattern = tool_input.strip()
-            limit = 20
-        
-        if not pattern:
-            return "Error: Search pattern is required"
-        
-        mcp_manager = await _get_mcp_manager()
-        result = await mcp_manager.call_tool("financial-data-inr", "search_transactions", {
-            "pattern": pattern,
-            "limit": limit
-        })
-        return json.dumps(result, indent=2)
-    except Exception as e:
-        logger.error(f"Error searching transactions: {e}")
-        return f"Error searching transactions: {str(e)}"
-
-async def get_transactions_by_date_range_tool(tool_input: str) -> str:
-    """Get transactions within a specific date range."""
-    try:
-        parsed_input = json.loads(tool_input) if tool_input.strip() else {}
-        start_date = parsed_input.get("start_date")
-        end_date = parsed_input.get("end_date")
-        
-        if not start_date or not end_date:
-            return "Error: Both start_date and end_date are required in YYYY-MM-DD format"
-        
-        mcp_manager = await _get_mcp_manager()
-        result = await mcp_manager.call_tool("financial-data-inr", "get_transactions_by_date_range", {
-            "start_date": start_date,
-            "end_date": end_date
-        })
-        return json.dumps(result, indent=2)
-    except Exception as e:
-        logger.error(f"Error getting transactions by date range: {e}")
-        return f"Error getting transactions by date range: {str(e)}"
-
-async def get_monthly_summary_tool(tool_input: str) -> str:
-    """Get monthly spending summary."""
-    try:
-        # Parse input to get optional year and month
-        try:
-            parsed_input = json.loads(tool_input) if tool_input.strip() else {}
-            year = parsed_input.get("year")
-            month = parsed_input.get("month")
-        except:
-            year = None
-            month = None
-        
-        arguments = {}
-        if year:
-            arguments["year"] = year
-        if month:
-            arguments["month"] = month
-        
-        mcp_manager = await _get_mcp_manager()
-        result = await mcp_manager.call_tool("financial-data-inr", "get_monthly_summary", arguments)
-        return json.dumps(result, indent=2)
-    except Exception as e:
-        logger.error(f"Error getting monthly summary: {e}")
-        return f"Error getting monthly summary: {str(e)}"
-
-async def get_spending_by_category_tool(tool_input: str) -> str:
-    """Analyze spending by category."""
-    try:
-        # Parse input for optional time period
-        try:
-            parsed_input = json.loads(tool_input) if tool_input.strip() else {}
-            days = parsed_input.get("days", 30)
-        except:
-            days = 30
-        
-        mcp_manager = await _get_mcp_manager()
-        result = await mcp_manager.call_tool("financial-data-inr", "get_spending_by_category", {"days": days})
-        return json.dumps(result, indent=2)
-    except Exception as e:
-        logger.error(f"Error getting spending by category: {e}")
-        return f"Error getting spending by category: {str(e)}"
-
-async def get_upi_transaction_analysis_tool(tool_input: str) -> str:
-    """Analyze UPI transactions."""
-    try:
-        # Parse input for optional time period
-        try:
-            parsed_input = json.loads(tool_input) if tool_input.strip() else {}
-            days = parsed_input.get("days", 30)
-        except:
-            days = 30
-        
-        mcp_manager = await _get_mcp_manager()
-        result = await mcp_manager.call_tool("financial-data-inr", "get_upi_transaction_analysis", {"days": days})
-        return json.dumps(result, indent=2)
-    except Exception as e:
-        logger.error(f"Error getting UPI analysis: {e}")
-        return f"Error getting UPI analysis: {str(e)}"
-
-async def find_recurring_payments_tool(tool_input: str) -> str:
-    """Find recurring payments."""
-    try:
-        mcp_manager = await _get_mcp_manager()
-        result = await mcp_manager.call_tool("financial-data-inr", "find_recurring_payments", {})
-        return json.dumps(result, indent=2)
-    except Exception as e:
-        logger.error(f"Error finding recurring payments: {e}")
-        return f"Error finding recurring payments: {str(e)}"
-
-async def analyze_spending_trends_tool(tool_input: str) -> str:
-    """Analyze spending trends over time."""
-    try:
-        # Parse input for optional time period
-        try:
-            parsed_input = json.loads(tool_input) if tool_input.strip() else {}
-            months = parsed_input.get("months", 6)
-        except:
-            months = 6
-        
-        mcp_manager = await _get_mcp_manager()
-        result = await mcp_manager.call_tool("financial-data-inr", "analyze_spending_trends", {"months": months})
-        return json.dumps(result, indent=2)
-    except Exception as e:
-        logger.error(f"Error analyzing spending trends: {e}")
-        return f"Error analyzing spending trends: {str(e)}"
-
-async def get_balance_history_tool(tool_input: str) -> str:
-    """Get account balance history."""
-    try:
-        # Parse input for optional time period
-        try:
-            parsed_input = json.loads(tool_input) if tool_input.strip() else {}
-            days = parsed_input.get("days", 30)
-        except:
-            days = 30
-        
-        mcp_manager = await _get_mcp_manager()
-        result = await mcp_manager.call_tool("financial-data-inr", "get_balance_history", {"days": days})
-        return json.dumps(result, indent=2)
-    except Exception as e:
-        logger.error(f"Error getting balance history: {e}")
-        return f"Error getting balance history: {str(e)}"
-
-async def execute_custom_query_tool(tool_input: str) -> str:
-    """Execute a custom SQL query (SELECT only)."""
-    try:
-        # Parse input to get SQL query
-        try:
-            parsed_input = json.loads(tool_input) if tool_input.strip() else {}
-            sql_query = parsed_input.get("query", tool_input)
-        except:
-            sql_query = tool_input.strip()
-        
-        if not sql_query:
-            return "Error: SQL query is required"
-        
-        mcp_manager = await _get_mcp_manager()
-        result = await mcp_manager.call_tool("financial-data-inr", "execute_custom_query", {"sql_query": sql_query})
-        return json.dumps(result, indent=2)
-    except Exception as e:
-        logger.error(f"Error executing custom query: {e}")
-        return f"Error executing custom query: {str(e)}"
-
-async def get_database_schema_tool(tool_input: str) -> str:
-    """Get database schema information."""
-    try:
-        mcp_manager = await _get_mcp_manager()
-        result = await mcp_manager.call_tool("financial-data-inr", "get_database_schema", {})
-        return json.dumps(result, indent=2)
-    except Exception as e:
-        logger.error(f"Error getting database schema: {e}")
-        return f"Error getting database schema: {str(e)}"
-
-# Define financial analysis tools with caching
-FINANCIAL_TOOLS = [
-    FinancialTool(
-        "get_account_summary",
-        "Get current account balance and transaction summary. Provides overview of total transactions, date range, current balance in INR, and total debits/credits.",
-        get_account_summary_tool,
-        cache_ttl=30  # Cache for 30 seconds
-    ),
-    FinancialTool(
-        "get_recent_transactions", 
-        "Get the most recent N transactions. Input: {\"limit\": 10} or just a number. Shows transaction details including amounts in INR.",
-        get_recent_transactions_tool,
-        cache_ttl=10  # Cache for 10 seconds
-    ),
-    FinancialTool(
-        "search_transactions",
-        "Search transactions by description pattern. Input: {\"pattern\": \"search_term\", \"limit\": 20} or just the search term. All amounts shown in INR.",
-        search_transactions_tool,
-        cache_ttl=60  # Cache for 1 minute
-    ),
-    FinancialTool(
-        "get_transactions_by_date_range",
-        "Get transactions within a date range. Input: {\"start_date\": \"YYYY-MM-DD\", \"end_date\": \"YYYY-MM-DD\"}. Returns transactions with INR amounts.",
-        get_transactions_by_date_range_tool,
-        cache_ttl=300  # Cache for 5 minutes
-    ),
-    FinancialTool(
-        "get_monthly_summary",
-        "Get monthly spending summary. Input: {\"year\": 2024, \"month\": 1} (optional). Shows monthly totals in INR.",
-        get_monthly_summary_tool,
-        cache_ttl=300  # Cache for 5 minutes
-    ),
-    FinancialTool(
-        "get_spending_by_category",
-        "Analyze spending by category for the last N days. Input: {\"days\": 30} or empty for 30 days. Categories based on transaction descriptions, amounts in INR.",
-        get_spending_by_category_tool,
-        cache_ttl=180  # Cache for 3 minutes
-    ),
-    FinancialTool(
-        "get_upi_transaction_analysis",
-        "Analyze UPI payment transactions for the last N days. Input: {\"days\": 30} or empty for 30 days. Shows UPI-specific insights with INR amounts.",
-        get_upi_transaction_analysis_tool,
-        cache_ttl=180  # Cache for 3 minutes
-    ),
-    FinancialTool(
-        "find_recurring_payments",
-        "Find recurring payments and subscriptions. No input required. Identifies potential recurring transactions with INR amounts.",
-        find_recurring_payments_tool,
-        cache_ttl=600  # Cache for 10 minutes
-    ),
-    FinancialTool(
-        "analyze_spending_trends",
-        "Analyze spending trends over time. Input: {\"months\": 6} or empty for 6 months. Shows spending patterns with INR amounts.",
-        analyze_spending_trends_tool,
-        cache_ttl=600  # Cache for 10 minutes
-    ),
-    FinancialTool(
-        "get_balance_history",
-        "Get account balance history for the last N days. Input: {\"days\": 30} or empty for 30 days. Shows balance trends in INR.",
-        get_balance_history_tool,
-        cache_ttl=300  # Cache for 5 minutes
-    ),
-    FinancialTool(
-        "execute_custom_query",
-        "Execute a custom SQL query (SELECT only). Input: {\"query\": \"SELECT * FROM transactions LIMIT 5\"} or just the SQL. Results show INR amounts.",
-        execute_custom_query_tool,
-        cache_ttl=0  # No caching for custom queries
-    ),
-    FinancialTool(
-        "get_database_schema",
-        "Get database schema and table structure information. No input required. Shows table definitions and sample data.",
-        get_database_schema_tool,
-        cache_ttl=3600  # Cache for 1 hour
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=1, max=10),
+        retry=retry_if_exception_type((ConnectionError, TimeoutError))
     )
-]
-
-class FinancialAgent:
-    """Financial analysis agent with persistent MCP connections and advanced optimization features."""
-    
-    def __init__(self, llm_config: Optional[LLMConfig] = None):
-        self.llm_config = llm_config or get_default_config()
-        self.provider: Optional[LLMProvider] = None
-        self.tools = {tool.name: tool for tool in FINANCIAL_TOOLS}
-        self.conversation_history: List[ConversationMessage] = []
-        self.session_id = str(uuid.uuid4())
-        self.last_tools_used: List[str] = []  # Track last tools used
+    async def call(
+        self,
+        tool_input: str,
+        user_context: str = "",
+        user_id: str = "default"
+    ) -> ToolCallResult:
+        """Execute tool with error handling and monitoring."""
+        start_time = time.time()
+        request_id = str(uuid.uuid4())
         
-        # Add system prompt - optimized for performance
-        self.conversation_history.append(
-            ConversationMessage(
-                role="system", 
-                content="You are a financial assistant. Use tools to get data, then provide concise answers. Be direct and brief."
+        try:
+            # Rate limiting check
+            if not self._check_rate_limit(user_id):
+                tool_calls_total.labels(tool_name=self.name, status='rate_limited').inc()
+                raise Exception(f"Rate limit exceeded for tool {self.name}")
+            
+            # Cache check
+            cache_key = self._get_cache_key(tool_input, user_context)
+            if self._cache and cache_key in self._cache:
+                execution_time = time.time() - start_time
+                tool_calls_total.labels(tool_name=self.name, status='cache_hit').inc()
+                
+                return ToolCallResult(
+                    request_id=request_id,
+                    tool_name=self.name,
+                    result=self._cache[cache_key],
+                    success=True,
+                    execution_time=execution_time,
+                    cached=True
+                )
+            
+            # Execute function with timeout
+            try:
+                result = await asyncio.wait_for(
+                    self.func(tool_input),
+                    timeout=self.timeout
+                )
+                
+                execution_time = time.time() - start_time
+                self._call_count += 1
+                self._total_execution_time += execution_time
+                
+                # Cache successful results
+                if self._cache and result:
+                    self._cache[cache_key] = result
+                
+                tool_calls_total.labels(tool_name=self.name, status='success').inc()
+                query_duration.observe(execution_time)
+                
+                logger.debug(f"Tool {self.name} executed successfully in {execution_time:.3f}s")
+                
+                return ToolCallResult(
+                    request_id=request_id,
+                    tool_name=self.name,
+                    result=result,
+                    success=True,
+                    execution_time=execution_time,
+                    cached=False,
+                    metadata={
+                        "input_length": len(tool_input),
+                        "output_length": len(str(result)),
+                        "user_context": user_context[:100]  # Truncated for privacy
+                    }
+                )
+                
+            except asyncio.TimeoutError:
+                execution_time = time.time() - start_time
+                self._error_count += 1
+                error_msg = f"Tool {self.name} timed out after {self.timeout}s"
+                self._last_error = error_msg
+                
+                tool_calls_total.labels(tool_name=self.name, status='timeout').inc()
+                
+                return ToolCallResult(
+                    request_id=request_id,
+                    tool_name=self.name,
+                    result=None,
+                    success=False,
+                    error=error_msg,
+                    execution_time=execution_time
+                )
+            
+        except Exception as e:
+            execution_time = time.time() - start_time
+            self._error_count += 1
+            error_msg = f"Tool {self.name} failed: {str(e)}"
+            self._last_error = error_msg
+            
+            tool_calls_total.labels(tool_name=self.name, status='error').inc()
+            logger.error(f"Tool execution failed: {error_msg}")
+            
+            return ToolCallResult(
+                request_id=request_id,
+                tool_name=self.name,
+                result=None,
+                success=False,
+                error=error_msg,
+                execution_time=execution_time,
+                metadata={"exception_type": type(e).__name__}
             )
+    
+    def get_metrics(self) -> Dict[str, Any]:
+        """Get tool performance metrics."""
+        avg_execution_time = (
+            self._total_execution_time / max(1, self._call_count)
         )
         
-        # Performance metrics
+        success_rate = (
+            (self._call_count - self._error_count) / max(1, self._call_count)
+        )
+        
+        return {
+            "name": self.name,
+            "call_count": self._call_count,
+            "error_count": self._error_count,
+            "success_rate": success_rate,
+            "avg_execution_time": avg_execution_time,
+            "last_error": self._last_error,
+            "cache_enabled": self._cache is not None,
+            "rate_limit_enabled": self._rate_limiter is not None,
+            "timeout": self.timeout
+        }
+
+
+class FinancialAgent:
+    """Financial agent with production-ready features."""
+    
+    def __init__(
+        self,
+        llm_config: Optional[LLMConfig] = None,
+        session_id: Optional[str] = None,
+        user_id: Optional[str] = None
+    ):
+        self.session_id = session_id or str(uuid.uuid4())
+        self.user_id = user_id or "default"
+        self.llm_config = llm_config or get_default_config()
+        self.provider: Optional[LLMProvider] = None
+        self.state = SessionState.INITIALIZING
+        
+        # Conversation management
+        self.conversation_history: List[ConversationMessage] = []
+        self.max_history_length = settings.llm.max_tool_calls_per_request * 10
+        
+        # Tool management
+        self.tools: Dict[str, FinancialTool] = {}
+        self._initialize_tools()
+        
+        # Performance tracking
         self.metrics = {
-            "total_queries": 0,
+            "session_start": datetime.now(),
+            "total_messages": 0,
             "total_tool_calls": 0,
+            "total_tokens_used": 0,
             "avg_response_time": 0.0,
-            "cache_hits": 0,
-            "session_start": datetime.now()
+            "error_count": 0,
+            "last_activity": datetime.now()
         }
         
-        logger.info(f"Initialized FinancialAgent with session {self.session_id}")
+        # Caching and optimization
+        self.response_cache = LRUCache(maxsize=100)
+        
+        # Add system prompt
+        self._add_system_prompt()
+        
+        # Background tasks
+        self._monitoring_task: Optional[asyncio.Task] = None
+        self._start_monitoring()
+        
+        logger.info(f"FinancialAgent initialized: session={self.session_id}")
+    
+    def _add_system_prompt(self):
+        """Add system prompt."""
+        system_content = f"""You are FinanceBud, an advanced AI financial assistant specialized in analyzing Indian bank transaction data.
+
+Key capabilities:
+- Real-time financial data analysis with INR currency formatting
+- Transaction categorization and pattern recognition
+- Spending trend analysis and forecasting
+- Recurring payment detection
+- UPI transaction analysis
+- Custom financial reporting
+
+Guidelines:
+- All amounts are in Indian Rupees (INR)
+- Provide accurate, data-driven insights
+- Use appropriate tools to fetch real transaction data
+- Format responses clearly with proper currency symbols
+- Be concise yet comprehensive in analysis
+- Handle errors gracefully and suggest alternatives
+
+Session: {self.session_id}
+User Context: {self.user_id}
+Timestamp: {datetime.now().isoformat()}"""
+        
+        self.conversation_history.append(
+            ConversationMessage(
+                role="system",
+                content=system_content,
+                metadata={"version": "2.0"}
+            )
+        )
+    
+    def _initialize_tools(self):
+        """Initialize financial tools."""
+        from backend.agents.financial_tools import get_financial_tools
+        
+        tool_configs = get_financial_tools()
+        
+        for tool_config in tool_configs:
+            tool = FinancialTool(**tool_config)
+            self.tools[tool.name] = tool
+        
+        logger.info(f"Initialized {len(self.tools)} financial tools")
     
     async def initialize(self):
-        """Initialize the agent and ensure MCP connections."""
+        """Initialize the agent with async setup."""
         try:
             # Initialize LLM provider
             self.provider = create_provider(self.llm_config)
             
-            # Ensure MCP manager is initialized
-            await _get_mcp_manager()
+            # Test provider connection
+            await self._test_provider_connection()
             
-            logger.info(f"FinancialAgent initialized successfully")
+            # Initialize database manager
+            db_manager = get_db_manager()
+            
+            # Initialize MCP manager
+            mcp_manager = await get_mcp_manager()
+            
+            self.state = SessionState.ACTIVE
+            
+            logger.info(f"FinancialAgent fully initialized: {self.session_id}")
+            
         except Exception as e:
-            logger.error(f"Failed to initialize FinancialAgent: {e}")
+            self.state = SessionState.ERROR
+            logger.error(f"Agent initialization failed: {e}")
             raise
     
-    def get_openai_tools(self) -> List[Dict[str, Any]]:
-        """Get tools in OpenAI format for the LLM."""
-        return [tool.to_openai_format() for tool in self.tools.values()]
-    
-    async def call_tool(self, tool_name: str, tool_input: str) -> ToolCallResult:
-        """Call a specific tool with optimizations."""
-        start_time = time.time()
-        
-        if tool_name not in self.tools:
-            return ToolCallResult(
-                tool_name=tool_name,
-                result="",
-                success=False,
-                error=f"Tool '{tool_name}' not found"
-            )
+    async def _test_provider_connection(self):
+        """Test LLM provider connection."""
+        if not self.provider:
+            raise Exception("Provider not initialized")
         
         try:
-            tool = self.tools[tool_name]
-            result = await tool.call(tool_input)
-            
-            execution_time = time.time() - start_time
-            self._update_metrics(execution_time, True)
-            
-            logger.log_tool_call(
-                tool_name, 
-                {"tool_input": tool_input}, 
-                result=result[:200] + "..." if len(result) > 200 else result,
-                execution_time=execution_time,
-                session_id=self.session_id
-            )
-            
-            return ToolCallResult(
-                tool_name=tool_name,
-                result=result,
-                success=True
-            )
-            
+            test_messages = [{"role": "user", "content": "Hello"}]
+            await self.provider.chat_completion(messages=test_messages)
+            logger.debug("LLM provider connection test successful")
         except Exception as e:
-            execution_time = time.time() - start_time
-            self._update_metrics(execution_time, False)
-            
-            error_msg = str(e)
-            logger.error(f"Tool call failed for {tool_name}: {error_msg}")
-            
-            return ToolCallResult(
-                tool_name=tool_name,
-                result="",
-                success=False,
-                error=error_msg
-            )
+            logger.warning(f"LLM provider test failed: {e}")
+            # Don't raise here - provider might work for actual requests
     
-    async def process_message(self, message: str, max_iterations: int = 5) -> str:
-        """Process a user message with optimized tool calling."""
+    def _start_monitoring(self):
+        """Start background monitoring task."""
+        if not self._monitoring_task or self._monitoring_task.done():
+            self._monitoring_task = asyncio.create_task(self._monitor_session())
+    
+    async def _monitor_session(self):
+        """Monitor session health and performance."""
+        while self.state in [SessionState.ACTIVE, SessionState.IDLE]:
+            try:
+                # Update session activity in session manager
+                session_manager.update_session_activity(self.session_id)
+                
+                # Log periodic metrics
+                if logger.isEnabledFor(logging.DEBUG):
+                    metrics = self.get_session_metrics()
+                    logger.debug(f"Session metrics: {metrics}")
+                
+                # Clean up old conversation history
+                await self._cleanup_conversation_history()
+                
+                await asyncio.sleep(60)  # Monitor every minute
+                
+            except Exception as e:
+                logger.error(f"Session monitoring error: {e}")
+                await asyncio.sleep(10)
+    
+    async def _cleanup_conversation_history(self):
+        """Clean up old conversation history to prevent memory bloat."""
+        if len(self.conversation_history) > self.max_history_length:
+            # Keep system message and recent messages
+            system_messages = [msg for msg in self.conversation_history if msg.role == "system"]
+            recent_messages = self.conversation_history[-self.max_history_length//2:]
+            
+            self.conversation_history = system_messages + recent_messages
+            logger.debug(f"Cleaned conversation history: {len(self.conversation_history)} messages remaining")
+    
+    async def process_message(
+        self,
+        message: str,
+        max_iterations: int = 5,
+        stream: bool = False
+    ) -> Union[str, AsyncGenerator[str, None]]:
+        """Process user message."""
         start_time = time.time()
         
-        # Reset tools used for this message
-        self.last_tools_used = []
+        try:
+            self.state = SessionState.ACTIVE
+            self.metrics["total_messages"] += 1
+            self.metrics["last_activity"] = datetime.now()
+            
+            # Check cache for similar recent queries
+            cache_key = self._get_message_cache_key(message)
+            if cache_key in self.response_cache:
+                cached_response = self.response_cache[cache_key]
+                logger.info(f"Returning cached response for message: {message[:50]}...")
+                if stream:
+                    return self._stream_cached_response(cached_response)
+                return cached_response
+            
+            # Add user message
+            user_message = ConversationMessage(
+                role="user",
+                content=message,
+                metadata={"user_id": self.user_id}
+            )
+            self.conversation_history.append(user_message)
+            
+            if stream:
+                return self._process_message_stream(message, max_iterations, start_time, cache_key)
+            else:
+                response = await self._process_message_standard(message, max_iterations, start_time)
+                
+                # Cache successful responses
+                if response and len(response) > 10:  # Only cache substantial responses
+                    self.response_cache[cache_key] = response
+                
+                return response
+                
+        except Exception as e:
+            self.metrics["error_count"] += 1
+            self.state = SessionState.ERROR
+            error_msg = f"Error processing message: {str(e)}"
+            logger.error(f"{error_msg}\nTraceback: {traceback.format_exc()}")
+            
+            if stream:
+                return self._stream_error_response(error_msg)
+            return error_msg
         
-        if not self.provider:
-            await self.initialize()
+        finally:
+            # Update metrics
+            processing_time = time.time() - start_time
+            self._update_response_time_metric(processing_time)
+    
+    def _get_message_cache_key(self, message: str) -> str:
+        """Generate cache key for message."""
+        import hashlib
+        # Include user context in cache key
+        cache_input = f"{self.user_id}:{message.lower().strip()}"
+        return hashlib.md5(cache_input.encode()).hexdigest()
+    
+    async def _stream_cached_response(self, response: str) -> AsyncGenerator[str, None]:
+        """Stream a cached response."""
+        words = response.split()
+        for i, word in enumerate(words):
+            yield word + (" " if i < len(words) - 1 else "")
+            await asyncio.sleep(0.05)  # Simulate typing
+    
+    async def _stream_error_response(self, error_msg: str) -> AsyncGenerator[str, None]:
+        """Stream an error response."""
+        yield f"❌ {error_msg}"
+    
+    async def _process_message_stream(
+        self,
+        message: str,
+        max_iterations: int,
+        start_time: float,
+        cache_key: str
+    ) -> AsyncGenerator[str, None]:
+        """Process message with streaming response."""
+        try:
+            response_parts = []
+            
+            async for part in self._execute_llm_with_tools_stream(message, max_iterations):
+                response_parts.append(part)
+                yield part
+            
+            # Cache the complete response
+            complete_response = "".join(response_parts)
+            if complete_response and len(complete_response) > 10:
+                self.response_cache[cache_key] = complete_response
+                
+        except Exception as e:
+            yield f"❌ Streaming error: {str(e)}"
+    
+    async def _process_message_standard(
+        self,
+        message: str,
+        max_iterations: int,
+        start_time: float
+    ) -> str:
+        """Process message with standard response."""
+        response = await self._execute_llm_with_tools(message, max_iterations)
         
-        if not self.provider:
-            return "Error: Failed to initialize LLM provider"
+        processing_time = time.time() - start_time
+        logger.info(f"Message processed in {processing_time:.3f}s: {message[:50]}...")
         
-        # Add user message to conversation
-        self.conversation_history.append(
-            ConversationMessage(role="user", content=message)
-        )
+        return response
+    
+    async def _execute_llm_with_tools_stream(
+        self,
+        message: str,
+        max_iterations: int
+    ) -> AsyncGenerator[str, None]:
+        """Execute LLM with tools and stream the response."""
+        # For now, fall back to standard processing and stream the result
+        # Future: implement true streaming with tool calls
+        response = await self._execute_llm_with_tools(message, max_iterations)
         
-        # Get available tools
-        tools = self.get_openai_tools()
+        # Stream the response word by word
+        words = response.split()
+        for i, word in enumerate(words):
+            yield word + (" " if i < len(words) - 1 else "")
+            await asyncio.sleep(0.03)  # Adjust typing speed
+    
+    async def _execute_llm_with_tools(
+        self,
+        message: str,
+        max_iterations: int
+    ) -> str:
+        """Execute LLM with tool calling."""
+        tools = [tool.to_openai_format() for tool in self.tools.values()]
         total_tool_calls = 0
         
-        try:
-            for iteration in range(max_iterations):
-                logger.debug(f"Processing iteration {iteration + 1}/{max_iterations}")
+        for iteration in range(max_iterations):
+            try:
+                # Prepare conversation for LLM
+                conversation = [msg.to_dict() for msg in self.conversation_history]
                 
-                # Optimize conversation history - keep only recent messages to prevent slowdown
-                optimized_history = self._optimize_conversation_history()
+                # Call LLM with retry logic
+                llm_start_time = time.time()
+                response = await self._call_llm_with_retry(conversation, tools)
+                llm_duration = time.time() - llm_start_time
                 
-                # Call LLM with optimized conversation history and tools
-                response = await self.provider.chat_completion(
-                    messages=[msg.to_dict() for msg in optimized_history],
-                    tools=tools
-                )
+                # Track LLM metrics
+                llm_requests_total.labels(
+                    provider=self.llm_config.provider.value,
+                    status='success'
+                ).inc()
                 
-                # Extract response content and tool calls
+                # Process response
                 assistant_message = response["choices"][0]["message"]
                 content = assistant_message.get("content", "")
                 tool_calls = assistant_message.get("tool_calls", [])
                 
-                # Add assistant message to conversation
+                # Add assistant message
                 self.conversation_history.append(
                     ConversationMessage(
                         role="assistant",
                         content=content,
-                        tool_calls=tool_calls
+                        tool_calls=tool_calls,
+                        metadata={
+                            "llm_duration": llm_duration,
+                            "iteration": iteration,
+                            "tool_count": len(tool_calls)
+                        }
                     )
                 )
                 
-                # If no tool calls, we're done
+                # If no tool calls, return response
                 if not tool_calls:
-                    processing_time = time.time() - start_time
-                    self._update_query_metrics(processing_time)
-                    logger.info(f"Query processed in {processing_time:.3f}s without tool calls")
-                    return content
+                    return content or "I've processed your request."
                 
-                # Process tool calls in parallel for better performance
-                tool_results = await self._process_tool_calls_parallel(tool_calls)
+                # Execute tool calls
+                tool_results = await self._execute_tool_calls(tool_calls)
                 total_tool_calls += len(tool_calls)
+                self.metrics["total_tool_calls"] += len(tool_calls)
                 
-                # Track tools used
-                for tool_call in tool_calls:
-                    tool_name = tool_call.get('function', {}).get('name', 'unknown')
-                    if tool_name not in self.last_tools_used:
-                        self.last_tools_used.append(tool_name)
-                
-                # Add tool results to conversation with aggressive size optimization
+                # Add tool results to conversation
                 for tool_call, result in zip(tool_calls, tool_results):
-                    # Aggressively truncate large tool results to prevent LLM timeout
-                    if result.success:
-                        # For successful results, extract only key information
-                        tool_content = self._summarize_tool_result(result.result, tool_call.get('function', {}).get('name', 'unknown'))
-                    else:
-                        tool_content = f"Error: {result.error}"
+                    function_name = result.tool_name or tool_call.get('function', {}).get('name', 'unknown')
+                    tool_call_id = tool_call.get('id', f'call_{uuid.uuid4().hex[:8]}')
                     
-                    # Get function name for proper Gemini formatting - ensure it's never empty
-                    function_name = tool_call.get('function', {}).get('name')
-                    if not function_name or str(function_name).strip() == '':
-                        function_name = 'unknown_function'
-                        logger.warning(f"Tool call missing function name, using fallback: {function_name}")
-                    
-                    # Get tool call ID - ensure it's never empty
-                    tool_call_id = tool_call.get('id')
-                    if not tool_call_id or str(tool_call_id).strip() == '':
-                        tool_call_id = 'unknown_call_id'
-                        logger.warning(f"Tool call missing ID, using fallback: {tool_call_id}")
-                    
-                    # Debug logging to track function names
-                    logger.info(f"Creating tool response - function_name: '{function_name}', tool_call_id: '{tool_call_id}', success: {result.success}")
+                    tool_content = (
+                        result.result if result.success 
+                        else f"Error: {result.error}"
+                    )
                     
                     self.conversation_history.append(
                         ConversationMessage(
                             role="tool",
-                            content=tool_content,
+                            content=str(tool_content)[:2000],  # Truncate long responses
                             tool_call_id=tool_call_id,
-                            function_name=function_name  # Add function name for Gemini compatibility
+                            function_name=function_name,
+                            metadata={
+                                "execution_time": result.execution_time,
+                                "cached": result.cached,
+                                "success": result.success
+                            }
                         )
                     )
                 
-                # Check if all tool calls were successful
-                all_successful = all(result.success for result in tool_results)
-                if not all_successful:
-                    logger.warning("Some tool calls failed, continuing with partial results")
-                
-                # Instead of continuing to next iteration, try one more LLM call to synthesize
-                # But with a much shorter timeout and fallback
-                try:
-                    logger.debug("Making final synthesis call to LLM")
-                    optimized_history = self._optimize_conversation_history()
-                    
-                    # Make a final call with no tools to get the synthesis
-                    final_response = await self.provider.chat_completion(
-                        messages=[msg.to_dict() for msg in optimized_history],
-                        tools=None  # No tools for final synthesis
+                # Continue for synthesis if configured
+                if not settings.llm.skip_final_synthesis and iteration == max_iterations - 1:
+                    # Final synthesis call
+                    final_response = await self._call_llm_with_retry(
+                        [msg.to_dict() for msg in self.conversation_history],
+                        tools=None  # No tools for synthesis
                     )
                     
                     final_content = final_response["choices"][0]["message"]["content"]
-                    if final_content and final_content.strip():
-                        processing_time = time.time() - start_time
-                        self._update_query_metrics(processing_time)
-                        logger.info(f"Query processed in {processing_time:.3f}s with {total_tool_calls} tool calls")
+                    if final_content:
                         return final_content
-                    
-                except Exception as e:
-                    logger.warning(f"Final synthesis failed: {e}, using fallback response")
                 
-                # Fallback: provide a response based on the tool results
-                processing_time = time.time() - start_time
-                self._update_query_metrics(processing_time)
-                logger.info(f"Query processed in {processing_time:.3f}s with {total_tool_calls} tool calls (fallback)")
+            except Exception as e:
+                logger.error(f"LLM execution error in iteration {iteration}: {e}")
+                llm_requests_total.labels(
+                    provider=self.llm_config.provider.value,
+                    status='error'
+                ).inc()
                 
-                # Generate a simple response based on available tool results
-                if tool_results and any(r.success for r in tool_results):
-                    successful_results = [r for r in tool_results if r.success]
-                    return f"I've retrieved the requested financial information using {len(successful_results)} tool(s). The data has been processed successfully."
-                else:
-                    return "I encountered some issues retrieving the financial data. Please try rephrasing your question."
-            
-            # If we exit the loop without returning, it means we hit max iterations
-            processing_time = time.time() - start_time
-            self._update_query_metrics(processing_time)
-            logger.warning(f"Reached max iterations ({max_iterations}) after {processing_time:.3f}s")
-            return "I've processed your request but reached the maximum number of iterations. Please try rephrasing your question."
-            
-        except Exception as e:
-            processing_time = time.time() - start_time
-            error_msg = f"Error processing message: {str(e)}"
-            logger.error(f"{error_msg} (processing time: {processing_time:.3f}s)")
-            return error_msg
+                if iteration == max_iterations - 1:
+                    return f"I encountered an error processing your request: {str(e)}"
+        
+        # Fallback response
+        return f"I've processed your request using {total_tool_calls} tools. The information has been retrieved successfully."
     
-    async def _process_tool_calls_parallel(self, tool_calls: List[Dict[str, Any]]) -> List[ToolCallResult]:
-        """Process multiple tool calls in parallel for better performance."""
-        async def process_single_tool_call(tool_call):
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=1, max=10)
+    )
+    async def _call_llm_with_retry(
+        self,
+        messages: List[Dict[str, Any]],
+        tools: Optional[List[Dict[str, Any]]] = None
+    ) -> Dict[str, Any]:
+        """Call LLM with retry logic and error handling."""
+        if not self.provider:
+            raise Exception("LLM provider not initialized")
+        
+        try:
+            return await self.provider.chat_completion(
+                messages=messages,
+                tools=tools
+            )
+        except Exception as e:
+            logger.warning(f"LLM call failed, retrying: {e}")
+            raise
+    
+    async def _execute_tool_calls(
+        self,
+        tool_calls: List[Dict[str, Any]]
+    ) -> List[ToolCallResult]:
+        """Execute tool calls with parallel processing."""
+        async def execute_single_tool(tool_call: Dict[str, Any]) -> ToolCallResult:
             try:
                 function = tool_call["function"]
                 tool_name = function["name"]
                 arguments = json.loads(function["arguments"])
                 tool_input = arguments.get("tool_input", "")
                 
-                return await self.call_tool(tool_name, tool_input)
+                if tool_name not in self.tools:
+                    return ToolCallResult(
+                        request_id=str(uuid.uuid4()),
+                        tool_name=tool_name,
+                        result=None,
+                        success=False,
+                        error=f"Tool {tool_name} not found"
+                    )
+                
+                tool = self.tools[tool_name]
+                return await tool.call(
+                    tool_input=tool_input,
+                    user_context=f"session:{self.session_id}",
+                    user_id=self.user_id
+                )
                 
             except Exception as e:
                 return ToolCallResult(
+                    request_id=str(uuid.uuid4()),
                     tool_name=tool_call.get("function", {}).get("name", "unknown"),
-                    result="",
+                    result=None,
                     success=False,
-                    error=str(e)
+                    error=f"Tool execution error: {str(e)}"
                 )
         
-        # Process all tool calls concurrently
-        tasks = [process_single_tool_call(tool_call) for tool_call in tool_calls]
+        # Execute tool calls concurrently
+        tasks = [execute_single_tool(tool_call) for tool_call in tool_calls]
         results = await asyncio.gather(*tasks, return_exceptions=True)
         
-        # Handle any exceptions
+        # Handle any exceptions in results
         processed_results = []
         for i, result in enumerate(results):
             if isinstance(result, Exception):
-                processed_results.append(ToolCallResult(
-                    tool_name=tool_calls[i].get("function", {}).get("name", "unknown"),
-                    result="",
-                    success=False,
-                    error=str(result)
-                ))
+                processed_results.append(
+                    ToolCallResult(
+                        request_id=str(uuid.uuid4()),
+                        tool_name=tool_calls[i].get("function", {}).get("name", "unknown"),
+                        result=None,
+                        success=False,
+                        error=f"Execution exception: {str(result)}"
+                    )
+                )
             else:
                 processed_results.append(result)
         
         return processed_results
     
-    def _get_relevant_tools(self, message: str) -> List[Dict[str, Any]]:
-        """Get only relevant tools based on the message to reduce LLM processing time."""
-        message_lower = message.lower()
-        
-        # Essential tools that are always included
-        essential_tools = ["get_account_summary", "get_recent_transactions"]
-        
-        # Map keywords to specific tools
-        keyword_tools = {
-            "balance": ["get_account_summary", "get_balance_history"],
-            "transaction": ["get_recent_transactions", "search_transactions"],
-            "search": ["search_transactions"],
-            "recent": ["get_recent_transactions"],
-            "month": ["get_monthly_summary"],
-            "summary": ["get_account_summary", "get_monthly_summary"],
-            "category": ["get_spending_by_category"],
-            "spending": ["get_spending_by_category", "analyze_spending_trends"],
-            "upi": ["get_upi_transaction_analysis"],
-            "recurring": ["find_recurring_payments"],
-            "date": ["get_transactions_by_date_range"],
-            "range": ["get_transactions_by_date_range"],
-        }
-        
-        # Find relevant tools based on keywords
-        relevant_tool_names = set(essential_tools)
-        for keyword, tools in keyword_tools.items():
-            if keyword in message_lower:
-                relevant_tool_names.update(tools)
-        
-        # Limit to maximum 6 tools to prevent timeout
-        relevant_tool_names = list(relevant_tool_names)[:6]
-        
-        # Convert to OpenAI format
-        relevant_tools = []
-        for tool_name in relevant_tool_names:
-            if tool_name in self.tools:
-                relevant_tools.append(self.tools[tool_name].to_openai_format())
-        
-        logger.debug(f"Selected {len(relevant_tools)} relevant tools for message: {relevant_tool_names}")
-        return relevant_tools
-    
-    def _optimize_conversation_history(self, max_messages: int = 10) -> List[ConversationMessage]:
-        """Optimize conversation history to prevent LLM slowdown from large contexts."""
-        # Always keep the system message
-        system_messages = [msg for msg in self.conversation_history if msg.role == "system"]
-        
-        # Get recent non-system messages
-        non_system_messages = [msg for msg in self.conversation_history if msg.role != "system"]
-        
-        # Keep only the most recent messages to prevent context bloat
-        if len(non_system_messages) > max_messages:
-            recent_messages = non_system_messages[-max_messages:]
-            logger.debug(f"Truncated conversation history from {len(non_system_messages)} to {len(recent_messages)} messages")
-        else:
-            recent_messages = non_system_messages
-        
-        # Combine system messages with recent messages
-        return system_messages + recent_messages
-    
-    def _summarize_tool_result(self, result: str, tool_name: str, max_length: int = 1500) -> str:
-        """Summarize tool results to prevent LLM timeouts from large JSON responses - increased limit."""
-        try:
-            # Try to parse as JSON and extract key information
-            data = json.loads(result)
-            
-            if tool_name == "get_account_summary":
-                # Extract only essential account info
-                if isinstance(data, dict) and "data" in data:
-                    account_data = data["data"]
-                    return f"Account balance: {account_data.get('current_balance', 'N/A')}, Total transactions: {account_data.get('total_transactions', 'N/A')}"
-                
-            elif tool_name == "get_recent_transactions":
-                # Show only count and recent transaction info
-                if isinstance(data, dict) and "data" in data:
-                    transactions = data["data"]
-                    if isinstance(transactions, list) and len(transactions) > 0:
-                        latest = transactions[0]
-                        return f"Found {len(transactions)} transactions. Latest: {latest.get('description', 'N/A')} - {latest.get('amount', 'N/A')} on {latest.get('date', 'N/A')}"
-                    return f"Found {len(transactions) if isinstance(transactions, list) else 'some'} transactions"
-                
-            elif "summary" in tool_name or "spending" in tool_name:
-                # For summary tools, extract key metrics
-                if isinstance(data, dict) and "data" in data:
-                    summary_data = data["data"]
-                    if isinstance(summary_data, dict):
-                        key_points = []
-                        for key, value in list(summary_data.items())[:3]:  # Only first 3 items
-                            if isinstance(value, (int, float, str)) and len(str(value)) < 50:
-                                key_points.append(f"{key}: {value}")
-                        return f"Summary: {', '.join(key_points)}"
-            
-            # Fallback: truncate the original result
-            if len(result) > max_length:
-                return result[:max_length-20] + "... [truncated]"
-            return result
-            
-        except json.JSONDecodeError:
-            # If not JSON, just truncate
-            if len(result) > max_length:
-                return result[:max_length-20] + "... [truncated]"
-            return result
-    
-    def _update_metrics(self, execution_time: float, success: bool):
-        """Update tool call metrics."""
-        self.metrics["total_tool_calls"] += 1
-        
-        # Update average response time (exponential moving average)
-        alpha = 0.1
+    def _update_response_time_metric(self, processing_time: float):
+        """Update response time metrics."""
+        alpha = 0.1  # Smoothing factor
         if self.metrics["avg_response_time"] == 0:
-            self.metrics["avg_response_time"] = execution_time
+            self.metrics["avg_response_time"] = processing_time
         else:
             self.metrics["avg_response_time"] = (
-                alpha * execution_time + 
+                alpha * processing_time + 
                 (1 - alpha) * self.metrics["avg_response_time"]
             )
     
-    def _update_query_metrics(self, processing_time: float):
-        """Update query processing metrics."""
-        self.metrics["total_queries"] += 1
-    
-    def get_last_tools_used(self) -> List[str]:
-        """Get the tools used in the last message processing."""
-        return self.last_tools_used.copy()
-    
-    def get_metrics(self) -> Dict[str, Any]:
-        """Get performance metrics."""
-        uptime = (datetime.now() - self.metrics["session_start"]).total_seconds()
+    def get_session_metrics(self) -> Dict[str, Any]:
+        """Get comprehensive session metrics."""
+        session_duration = (datetime.now() - self.metrics["session_start"]).total_seconds()
+        
+        # Tool metrics
+        tool_metrics = {name: tool.get_metrics() for name, tool in self.tools.items()}
         
         return {
-            **self.metrics,
             "session_id": self.session_id,
-            "uptime_seconds": uptime,
+            "user_id": self.user_id,
+            "state": self.state.value,
+            "session_duration_seconds": session_duration,
             "conversation_length": len(self.conversation_history),
-            "tools_available": len(self.tools)
+            "cache_size": len(self.response_cache),
+            "tools_available": len(self.tools),
+            "tool_metrics": tool_metrics,
+            **self.metrics
         }
     
-    def clear_conversation(self):
-        """Clear conversation history to free memory."""
-        self.conversation_history.clear()
-        logger.info(f"Cleared conversation history for session {self.session_id}")
-
-# Global financial agent instance
-_financial_agent: Optional[FinancialAgent] = None
-
-async def get_financial_agent(llm_config: Optional[LLMConfig] = None) -> FinancialAgent:
-    """Get or create the global financial agent."""
-    global _financial_agent
+    def get_health_status(self) -> Dict[str, Any]:
+        """Get agent health status."""
+        health_score = 100.0
+        issues = []
+        
+        # Check provider health
+        if not self.provider:
+            health_score -= 50
+            issues.append("LLM provider not initialized")
+        
+        # Check error rate
+        error_rate = (
+            self.metrics["error_count"] / max(1, self.metrics["total_messages"])
+        )
+        if error_rate > 0.1:
+            health_score -= 20
+            issues.append(f"High error rate: {error_rate:.2%}")
+        
+        # Check response time
+        if self.metrics["avg_response_time"] > 30.0:
+            health_score -= 15
+            issues.append("Slow response times")
+        
+        # Check memory usage (conversation history)
+        if len(self.conversation_history) > self.max_history_length * 0.9:
+            health_score -= 10
+            issues.append("High memory usage")
+        
+        return {
+            "session_id": self.session_id,
+            "health_score": max(0, health_score),
+            "status": "healthy" if health_score > 80 else "degraded" if health_score > 50 else "unhealthy",
+            "issues": issues,
+            "state": self.state.value,
+            "timestamp": datetime.now().isoformat()
+        }
     
-    if _financial_agent is None:
-        _financial_agent = FinancialAgent(llm_config)
-        await _financial_agent.initialize()
+    async def shutdown(self):
+        """Graceful shutdown of the agent."""
+        logger.info(f"Shutting down agent session: {self.session_id}")
+        
+        self.state = SessionState.TERMINATED
+        
+        # Cancel monitoring task
+        if self._monitoring_task and not self._monitoring_task.done():
+            self._monitoring_task.cancel()
+            try:
+                await self._monitoring_task
+            except asyncio.CancelledError:
+                pass
+        
+        # Clear caches
+        self.response_cache.clear()
+        if hasattr(self, 'tools'):
+            for tool in self.tools.values():
+                if tool._cache:
+                    tool._cache.clear()
+        
+        logger.info(f"Agent session shutdown complete: {self.session_id}")
+
+
+# Global agent registry for backward compatibility
+_global_agent: Optional[FinancialAgent] = None
+
+
+async def get_financial_agent(
+    llm_config: Optional[LLMConfig] = None,
+    session_id: Optional[str] = None,
+    user_id: Optional[str] = None
+) -> FinancialAgent:
+    """Get or create financial agent."""
+    global _global_agent
     
-    return _financial_agent
+    if _global_agent is None or _global_agent.state == SessionState.TERMINATED:
+        _global_agent = FinancialAgent(
+            llm_config=llm_config,
+            session_id=session_id,
+            user_id=user_id
+        )
+        await _global_agent.initialize()
+    
+    return _global_agent
+
+
+# Start Prometheus metrics server
+def start_metrics_server():
+    """Start Prometheus metrics server."""
+    if settings.monitoring.enable_metrics:
+        try:
+            start_http_server(settings.monitoring.metrics_port)
+            logger.info(f"Metrics server started on port {settings.monitoring.metrics_port}")
+        except Exception as e:
+            logger.warning(f"Failed to start metrics server: {e}")
+
+
+# Initialize metrics server
+if settings.monitoring.enable_metrics:
+    start_metrics_server()

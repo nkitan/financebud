@@ -1,34 +1,210 @@
 [project]
 name = "financebud"
-version = "0.1.0"
-description = "Add your description here"
+version = "2.0.0"
+description = "Production-ready financial analysis agent with real-time data processing and advanced MCP integration"
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.11"
+authors = [
+    {name = "FinanceBud Team", email = "support@financebud.com"}
+]
+license = {text = "MIT"}
+keywords = ["finance", "ai", "mcp", "financial-analysis", "agent"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Financial and Insurance Industry",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Office/Business :: Financial",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
 dependencies = [
-    "aiofiles>=23.2.1",
-    "aiohttp>=3.9.0",
-    "alembic>=1.12.0",
-    "black>=23.0.0",
-    "fastapi>=0.104.0",
+    # Core Financial MCP Server Dependencies - Latest Versions
     "fastmcp>=0.9.0",
-    "httpx>=0.25.0",
-    "httpx-sse>=0.4.0",
-    "isort>=5.12.0",
-    "jinja2>=3.1.0",
-    "langchain>=0.2.0",
-    "langchain-community>=0.2.0",
-    "langchain-core>=0.2.0",
-    "langchain-openai>=0.1.0",
-    "langgraph>=0.2.0",
-    "pandas>=1.5.0",
-    "pydantic>=2.4.0",
-    "pytest>=7.4.0",
-    "pytest-asyncio>=0.21.0",
-    "python-dotenv>=1.0.0",
-    "python-multipart>=0.0.6",
-    "requests>=2.31.0",
-    "sqlalchemy>=2.0.0",
-    "uvicorn[standard]>=0.24.0",
-    "websockets>=12.0",
+    "pandas>=2.2.0",
+    "numpy>=1.26.0",
+    
+    # FastAPI Backend Dependencies - Latest Production Ready
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    "websockets>=13.1",
     "wsproto>=1.2.0",
+    "pydantic>=2.10.0",
+    "pydantic-settings>=2.6.0",
+    "python-multipart>=0.0.12",
+    "jinja2>=3.1.4",
+    "aiofiles>=24.1.0",
+    "requests>=2.32.0",
+    "aiohttp>=3.11.0",
+    
+    # LangGraph and AI Dependencies - Latest Production Ready
+    "langgraph>=0.2.55",
+    "langchain>=0.3.10",
+    "langchain-core>=0.3.28",
+    "langchain-community>=0.3.10",
+    "langchain-openai>=0.2.10",
+    "langsmith>=0.2.0",
+    
+    # HTTP and async support
+    "httpx>=0.28.0",
+    "httpx-sse>=0.4.0",
+    "asyncio-mqtt>=0.11.0",
+    
+    # Database and Data Processing - Latest Production Ready
+    "sqlalchemy>=2.0.36",
+    "alembic>=1.14.0",
+    "sqlite-utils>=3.38.0",
+    "polars>=1.15.0",
+    
+    # Monitoring and Observability
+    "prometheus-client>=0.21.0",
+    "structlog>=24.4.0",
+    "rich>=13.9.0",
+    "typer>=0.15.0",
+    
+    # Security and Validation
+    "cryptography>=43.0.0",
+    "python-jose[cryptography]>=3.3.0",
+    "passlib[bcrypt]>=1.7.4",
+    
+    # Production deployment dependencies
+    "gunicorn>=23.0.0",
+    "python-dotenv>=1.0.1",
+    "click>=8.1.0",
+    
+    # Data visualization and analysis
+    "plotly>=5.24.0",
+    "matplotlib>=3.9.0",
+    "seaborn>=0.13.0",
+    
+    # Additional utilities
+    "tenacity>=9.0.0",
+    "cachetools>=5.5.0",
+    "psutil>=6.1.0",
+    "lxml>=5.3.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.24.0",
+    "pytest-cov>=6.0.0",
+    "pytest-mock>=3.14.0",
+    "pytest-benchmark>=4.0.0",
+    "black>=24.10.0",
+    "isort>=5.13.0",
+    "mypy>=1.13.0",
+    "ruff>=0.8.0",
+    "pre-commit>=4.0.0",
+]
+
+test = [
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.24.0",
+    "pytest-cov>=6.0.0",
+    "pytest-mock>=3.14.0",
+    "pytest-benchmark>=4.0.0",
+    "httpx>=0.28.0",
+    "respx>=0.21.0",
+]
+
+docs = [
+    "mkdocs>=1.6.0",
+    "mkdocs-material>=9.5.0",
+    "mkdocstrings[python]>=0.26.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/financebud/financebud"
+Documentation = "https://docs.financebud.com"
+Repository = "https://github.com/financebud/financebud.git"
+Issues = "https://github.com/financebud/financebud/issues"
+
+[project.scripts]
+financebud = "backend.main:app"
+financebud-mcp = "mcp_server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["backend"]
+
+[tool.black]
+line-length = 88
+target-version = ['py311']
+include = '\.pyi?$'
+exclude = '''
+/(
+    \.eggs
+  | \.git
+  | \.hg
+  | \.mypy_cache
+  | \.tox
+  | \.venv
+  | _build
+  | buck-out
+  | build
+  | dist
+)/
+'''
+
+[tool.isort]
+profile = "black"
+multi_line_output = 3
+line_length = 88
+known_first_party = ["backend", "tests"]
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+disallow_untyped_decorators = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_no_return = true
+warn_unreachable = true
+strict_equality = true
+
+[tool.ruff]
+line-length = 88
+target-version = "py311"
+select = ["E", "F", "I", "N", "W", "UP"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short --strict-markers"
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "integration: marks tests as integration tests",
+    "unit: marks tests as unit tests",
+    "benchmark: marks tests as benchmark tests",
+]
+asyncio_mode = "auto"
+
+[tool.coverage.run]
+source = ["backend"]
+omit = ["*/tests/*"]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "if self.debug:",
+    "if settings.DEBUG",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if 0:",
+    "if __name__ == .__main__.:",
 ]

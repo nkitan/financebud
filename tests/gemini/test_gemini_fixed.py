@@ -23,6 +23,9 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+import pytest
+
+@pytest.mark.asyncio
 async def test_fixed_gemini():
     """Test that the Gemini fix works."""
     print("🔍 Testing fixed Gemini provider...")
