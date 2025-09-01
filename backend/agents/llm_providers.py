@@ -340,12 +340,15 @@ class GeminiProvider(LLMProvider):
             else:
                 validated_messages.append(msg)
         
-        # Set longer timeouts for complex tool processing
+        # Set timeouts. Use config.timeout (resolved from env vars). For Gemini
+        # we prefer a shorter default for regular chats to avoid long waits.
         timeout = self.config.timeout
         if tools and len(tools) > 0:
-            timeout = min(timeout, 300)  # Max 5 minutes when processing with tools
+            # Allow longer time when processing tool outputs (respect config)
+            timeout = timeout
         else:
-            timeout = min(timeout, 300)  # Max 5 minutes for regular chat
+            # For regular Gemini chat, cap at 60s by default to avoid 24s-ish tool timeouts observed.
+            timeout = min(timeout, 60)
         
         payload = {
             "model": self.config.model,
@@ -646,15 +649,25 @@ def get_default_config() -> LLMConfig:
     
     config_data = defaults[provider]
     
-    # Set provider-specific timeout defaults - increased for complex queries
-    default_timeout = "300" if provider == ProviderType.OLLAMA else "300"
-    
+    # Provider-specific timeout defaults (seconds). Can be overridden with
+    # a global LLM_TIMEOUT or a provider-specific env var (e.g. LLM_GEMINI_TIMEOUT).
+    provider_timeout_defaults = {
+        ProviderType.OLLAMA: os.getenv("LLM_OLLAMA_TIMEOUT", "300"),
+        ProviderType.OPENAI: os.getenv("LLM_OPENAI_TIMEOUT", "300"),
+        ProviderType.GEMINI: os.getenv("LLM_GEMINI_TIMEOUT", "60"),
+        ProviderType.OPENROUTER: os.getenv("LLM_OPENROUTER_TIMEOUT", "300"),
+    }
+
+    # Resolve timeout: global LLM_TIMEOUT overrides provider default when set,
+    # otherwise use the provider-specific default.
+    resolved_default = provider_timeout_defaults.get(provider, os.getenv("LLM_TIMEOUT", "300"))
+
     return LLMConfig(
         provider=provider,
         base_url=config_data["base_url"],
         api_key=config_data["api_key"],
         model=config_data["model"],
-        timeout=int(os.getenv("LLM_TIMEOUT", default_timeout)),
+        timeout=int(os.getenv("LLM_TIMEOUT", resolved_default)),
         max_tokens=int(os.getenv("LLM_MAX_TOKENS", "1000")),  # Increased for complete responses
         temperature=float(os.getenv("LLM_TEMPERATURE", "0.7"))
     )
