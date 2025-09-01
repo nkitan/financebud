@@ -229,15 +229,27 @@ async def chat_endpoint(message: ChatMessage, agent: FinancialAgent = Depends(ge
         start_time = datetime.now()
         
         # Process the message with the financial agent
-        response = await agent.process_message(message.content)
-        
+        raw_response = await agent.process_message(message.content)
+
+        # If the agent returned an async generator (streaming), consume it into a single string.
+        # Guard against plain strings which are iterable but not async iterables.
+        response_text = ''
+        try:
+            if hasattr(raw_response, '__aiter__') and not isinstance(raw_response, str):
+                async for part in raw_response:
+                    response_text += str(part)
+            else:
+                response_text = str(raw_response)
+        except Exception:
+            response_text = str(raw_response)
+
         processing_time = (datetime.now() - start_time).total_seconds()
-        
+
         # Get session ID (use provided or generate new one)
         session_id = message.session_id or str(uuid.uuid4())
-        
+
         return ChatResponse(
-            response=response,
+            response=response_text,
             session_id=session_id,
             processing_time=processing_time,
             tool_calls=[]  # TODO: Extract tool calls from agent response if needed
@@ -358,33 +370,40 @@ async def websocket_session_endpoint(websocket: WebSocket, session_id: str):
                         
                         try:
                             # Add timeout wrapper to prevent hanging
-                            response = await asyncio.wait_for(
+                            raw_response = await asyncio.wait_for(
                                 financial_agent.process_message(content),
                                 timeout=320.0  # 5 minutes + 20 seconds buffer
                             )
+
                             processing_time = (datetime.now() - start_time).total_seconds()
-                            
+
+                            # If the agent returned an async generator (streaming), consume it into a single string.
+                            response_text = ''
+                            try:
+                                if hasattr(raw_response, '__aiter__') and not isinstance(raw_response, str):
+                                    async for part in raw_response:
+                                        response_text += str(part)
+                                else:
+                                    response_text = str(raw_response)
+                            except Exception:
+                                response_text = str(raw_response)
+
                             # Get tools used in this response
-                            tools_used = financial_agent.get_last_tools_used()
-                            
-                            logger.info(f"Agent response received in {processing_time:.2f}s: {response[:100]}...")
-                            
-                            # Send response back to client
+                            tools_used = financial_agent.get_last_tools_used() if financial_agent else []
+
+                            logger.info(f"Agent response received in {processing_time:.2f}s: {response_text[:100]}...")
+
+                            # Send response back to client (flattened payload expected by frontend)
                             response_data = {
                                 "type": "response",
-                                "data": {
-                                    "response": response,
-                                    "tools_used": tools_used,
-                                    "execution_time": processing_time
-                                },
+                                "content": response_text,
+                                "tools_used": tools_used,
+                                "processing_time": processing_time,
                                 "session_id": session_id,
                                 "timestamp": datetime.now().isoformat()
                             }
-                            
-                            await manager.send_personal_message(
-                                json.dumps(response_data), 
-                                websocket
-                            )
+
+                            await manager.send_personal_message(json.dumps(response_data), websocket)
                             logger.info("Response sent to client")
                         
                         except asyncio.TimeoutError:
