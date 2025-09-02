@@ -11,7 +11,6 @@
 # podman-compose up --build
 #
 # Access the application:
-# - Frontend: http://localhost:8080
 # - Backend API: http://localhost:8000
 services:
   backend:
@@ -29,12 +28,3 @@ services:
       - .env
     command: python -m uvicorn backend.main:app --host 0.0.0.0 --port 8000
     # The backend service also starts the mcp_server.py as a subprocess.
-
-  frontend:
-    # The frontend service uses a lightweight nginx server to serve the static
-    # HTML, CSS, and JavaScript files from the 'frontend' directory.
-    image: nginx:alpine
-    ports:
-      - "8080:80"
-    volumes:
-      - ./frontend:/usr/share/nginx/html:ro

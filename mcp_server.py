@@ -484,12 +484,16 @@ def get_database_schema() -> str:
         return serialize_result({"error": f"Error getting database schema: {str(e)}"})
 
 @mcp.tool()
-def find_recurring_payments(min_occurrences: int = 3, days_back: int = 90) -> str:
-    """Find potential recurring payments by analyzing transaction patterns. All amounts in INR."""
+def find_recurring_payments(min_occurrences: int = 3, days_back: int = 90, top_n: int = 20) -> str:
+    """Find potential recurring payments by analyzing transaction patterns. All amounts in INR.
+
+    New parameter: top_n (int) - maximum number of recurring payees to return (LIMIT).
+    """
     try:
         # Validate parameters
         min_occurrences = max(2, min(min_occurrences, 10))
         days_back = max(7, min(days_back, 365))
+        top_n = max(1, min(top_n, 100))
         
         start_date = (datetime.now() - timedelta(days=days_back)).strftime('%Y-%m-%d')
         
@@ -549,9 +553,9 @@ def find_recurring_payments(min_occurrences: int = 3, days_back: int = 90) -> st
                 amount * frequency as total_spent
             FROM recurring_candidates
             ORDER BY frequency DESC, total_spent DESC
-            LIMIT 20
+            LIMIT ?
             """,
-            (start_date, min_occurrences),
+            (start_date, min_occurrences, top_n),
             cache_ttl=300  # Cache for 5 minutes
         )
         
@@ -567,6 +571,7 @@ def find_recurring_payments(min_occurrences: int = 3, days_back: int = 90) -> st
         response = {
             "analysis_period_days": days_back,
             "minimum_occurrences": min_occurrences,
+            "limit_applied": top_n,
             "recurring_payments": recurring_payments,
             "summary": {
                 "total_recurring_payees": len(recurring_payments),
@@ -699,7 +704,7 @@ def analyze_spending_trends(months_back: int = 6) -> str:
 def get_performance_stats() -> str:
     """Get performance statistics for the optimized MCP server."""
     try:
-        db_stats = db_manager.get_stats()
+        db_stats = db_manager.get_comprehensive_stats()
         
         response = {
             "database_performance": db_stats,

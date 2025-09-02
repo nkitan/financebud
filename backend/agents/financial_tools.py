@@ -342,26 +342,43 @@ async def find_recurring_payments_tool(tool_input: str) -> str:
     try:
         min_occurrences = 3
         days_back = 90
-        
+        top_n = 20
+
         if tool_input.strip():
             try:
                 parsed_input = json.loads(tool_input)
                 min_occurrences = parsed_input.get("min_occurrences", 3)
                 days_back = parsed_input.get("days_back", 90)
+                top_n = parsed_input.get("top_n", 20)
             except json.JSONDecodeError:
-                pass
-        
+                # Support simple space-separated fallback: "min_occurrences days_back top_n"
+                try:
+                    parts = tool_input.strip().split()
+                    if len(parts) >= 1:
+                        min_occurrences = int(parts[0])
+                    if len(parts) >= 2:
+                        days_back = int(parts[1])
+                    if len(parts) >= 3:
+                        top_n = int(parts[2])
+                except Exception:
+                    pass
+
+        # Constrain inputs
+        min_occurrences = max(2, min(min_occurrences, 10))
+        days_back = max(7, min(days_back, 365))
+        top_n = max(1, min(top_n, 100))
+
         mcp_manager = await get_mcp_manager()
         result = await mcp_manager.call_tool(
             "financial-data-inr",
             "find_recurring_payments",
-            {"min_occurrences": min_occurrences, "days_back": days_back}
+            {"min_occurrences": min_occurrences, "days_back": days_back, "top_n": top_n}
         )
-        
+
         # Enhance with recurring payment insights
         if isinstance(result, dict) and "data" in result:
             recurring_payments = result["data"].get("recurring_payments", [])
-            
+
             result = {
                 **result,
                 "recurring_insights": {
@@ -371,11 +388,11 @@ async def find_recurring_payments_tool(tool_input: str) -> str:
                     "upcoming_payments": _predict_upcoming_payments(recurring_payments)
                 }
             }
-            
+
             return json.dumps(result, indent=2, ensure_ascii=False)
-        
+
         return json.dumps(result, indent=2, ensure_ascii=False)
-        
+
     except Exception as e:
         logger.error(f"Recurring payments tool error: {e}")
         return json.dumps({
@@ -517,7 +534,7 @@ async def get_database_schema_tool(tool_input: str) -> str:
         
         # Enhance with schema insights
         if isinstance(result, dict) and "data" in result:
-            data_freshness = await _assess_data_freshness()
+            data_freshness = _assess_data_freshness()
             result = {
                 **result,
                 "schema_insights": {
@@ -527,9 +544,7 @@ async def get_database_schema_tool(tool_input: str) -> str:
                     "data_freshness": data_freshness
                 }
             }
-            
-            return json.dumps(result, indent=2, ensure_ascii=False)
-        
+
         return json.dumps(result, indent=2, ensure_ascii=False)
         
     except Exception as e:
@@ -750,19 +765,20 @@ def _analyze_weekday_patterns(transactions: List[Dict[str, Any]]) -> Dict[str, i
         "Monday": 0, "Tuesday": 0, "Wednesday": 0, "Thursday": 0,
         "Friday": 0, "Saturday": 0, "Sunday": 0
     }
-    
+
     weekday_names = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
-    
+
     for transaction in transactions:
         date_str = transaction.get("transaction_date")
-        if date_str:
-            try:
-                date_obj = datetime.strptime(date_str, "%Y-%m-%d")
-                weekday = weekday_names[date_obj.weekday()]
-                weekday_counts[weekday] += 1
-            except ValueError:
-                continue
-    
+        if not date_str:
+            continue
+        try:
+            date_obj = datetime.strptime(date_str, "%Y-%m-%d")
+            weekday = weekday_names[date_obj.weekday()]
+            weekday_counts[weekday] += 1
+        except ValueError:
+            continue
+
     return weekday_counts
 
 

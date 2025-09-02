@@ -92,6 +92,7 @@ class BankStatementConsolidator:
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS transactions (
                 transaction_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                account_id INTEGER NOT NULL,
                 statement_id INTEGER,
                 transaction_date DATE NOT NULL,
                 value_date DATE,
@@ -105,7 +106,9 @@ class BankStatementConsolidator:
                 upi_id TEXT,
                 bank_code TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (statement_id) REFERENCES statements (statement_id)
+                FOREIGN KEY (account_id) REFERENCES accounts (account_id),
+                FOREIGN KEY (statement_id) REFERENCES statements (statement_id),
+                UNIQUE (account_id, transaction_date, value_date, description, debit_amount, credit_amount, balance)
             )
         """)
         
@@ -409,8 +412,15 @@ class BankStatementConsolidator:
     def process_statement_file(self, file_path: str) -> bool:
         """Process a single statement file."""
         try:
-            logger.info(f"Processing file: {os.path.basename(file_path)}")
+            file_name = os.path.basename(file_path)
+            logger.info(f"Processing file: {file_name}")
             
+            cursor = self.conn.cursor()
+            cursor.execute("SELECT statement_id FROM statements WHERE file_name = ?", (file_name,))
+            if cursor.fetchone():
+                logger.info(f"Skipping already processed file: {file_name}")
+                return True
+
             with open(file_path, 'r', encoding='utf-8') as f:
                 lines = f.readlines()
             
@@ -450,7 +460,7 @@ class BankStatementConsolidator:
                 VALUES (?, ?, ?, ?, ?)
             """, (
                 account_id,
-                os.path.basename(file_path),
+                file_name,
                 account_info.get('start_date'),
                 account_info.get('end_date'),
                 account_info.get('opening_balance')
@@ -473,12 +483,12 @@ class BankStatementConsolidator:
             # Insert transactions
             if transactions:
                 cursor.executemany("""
-                    INSERT INTO transactions 
-                    (statement_id, transaction_date, value_date, description, transaction_type,
+                    INSERT OR IGNORE INTO transactions 
+                    (account_id, statement_id, transaction_date, value_date, description, transaction_type,
                      debit_amount, credit_amount, balance, reference_number, beneficiary_name, upi_id, bank_code)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, [
-                    (t['statement_id'], t['transaction_date'], t['value_date'], t['description'],
+                    (account_id, t['statement_id'], t['transaction_date'], t['value_date'], t['description'],
                      t['transaction_type'], t['debit_amount'], t['credit_amount'], t['balance'],
                      t['reference_number'], t['beneficiary_name'], t['upi_id'], t['bank_code'])
                     for t in transactions
@@ -491,7 +501,7 @@ class BankStatementConsolidator:
                         UPDATE statements SET closing_balance = ? WHERE statement_id = ?
                     """, (closing_balance, statement_id))
                 
-                logger.info(f"Processed {len(transactions)} transactions from {os.path.basename(file_path)}")
+                logger.info(f"Processed {len(transactions)} transactions from {file_name}")
             
             self.conn.commit()
             return True
