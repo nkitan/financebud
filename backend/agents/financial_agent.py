@@ -725,7 +725,7 @@ Timestamp: {datetime.now().isoformat()}"""
         words = response.split()
         for i, word in enumerate(words):
             yield word + (" " if i < len(words) - 1 else "")
-            await asyncio.sleep(0.05)  # Simulate typing
+            pass  # Removed artificial typing delay
     
     async def _stream_error_response(self, error_msg: str) -> AsyncGenerator[str, None]:
         """Stream an error response."""
@@ -782,7 +782,7 @@ Timestamp: {datetime.now().isoformat()}"""
         words = response.split()
         for i, word in enumerate(words):
             yield word + (" " if i < len(words) - 1 else "")
-            await asyncio.sleep(0.03)  # Adjust typing speed
+            pass  # Removed artificial typing speed
     
     async def _execute_llm_with_tools(
         self,

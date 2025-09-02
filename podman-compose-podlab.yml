@@ -1,7 +1,7 @@
 services:
   backend:
     build:
-      context: /mounts/financebud
+      context: /Work/financebud
       dockerfile_inline: |
         FROM python:3.11-slim
         WORKDIR /app
@@ -15,4 +15,11 @@ services:
       - APP_HOME=/app
     command: sh -c "python3 consolidate_statements.py && python -m uvicorn backend.main:app --host 0.0.0.0 --port 8000"
     volumes:
-      - /home/notroot/Work/podlab/data/mounts/financebud/:/app
+      - /home/notroot/Work/financebud/:/app
+    networks:
+      - web_application_network
+
+networks:
+  web_application_network:
+    external: true
+    name: podlab_web_application_network

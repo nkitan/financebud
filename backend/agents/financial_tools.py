@@ -378,6 +378,12 @@ async def find_recurring_payments_tool(tool_input: str) -> str:
         # Enhance with recurring payment insights
         if isinstance(result, dict) and "data" in result:
             recurring_payments = result["data"].get("recurring_payments", [])
+            
+            max_payments_to_return = 10
+            truncated_message = ""
+            if len(recurring_payments) > max_payments_to_return:
+                truncated_message = f" (showing top {max_payments_to_return} out of {len(recurring_payments)} found)"
+                recurring_payments = recurring_payments[:max_payments_to_return]
 
             result = {
                 **result,
@@ -386,7 +392,9 @@ async def find_recurring_payments_tool(tool_input: str) -> str:
                     "cost_optimization": _identify_cost_optimization(recurring_payments),
                     "payment_reliability": _analyze_payment_reliability(recurring_payments),
                     "upcoming_payments": _predict_upcoming_payments(recurring_payments)
-                }
+                },
+                "recurring_payments": recurring_payments, # Add the (potentially truncated) list back
+                "message": f"Successfully found recurring payments{truncated_message}."
             }
 
             return json.dumps(result, indent=2, ensure_ascii=False)

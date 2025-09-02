@@ -152,7 +152,7 @@ def get_recent_transactions(limit: int = 10) -> str:
 
 @mcp.tool()
 def search_transactions(pattern: str, limit: int = 20) -> str:
-    """Search transactions by description pattern. Case-insensitive search. All amounts in INR."""
+    """Search transactions by description pattern using Full-Text Search. Case-insensitive search. All amounts in INR."""
     try:
         if not pattern:
             return serialize_result({"error": "Search pattern cannot be empty"})
@@ -160,16 +160,18 @@ def search_transactions(pattern: str, limit: int = 20) -> str:
         # Validate limit
         limit = max(1, min(limit, 100))
         
+        # Use FTS5 for fast text search
         result = db_manager.execute_query(
             """
-            SELECT transaction_id, transaction_date, description, transaction_type,
-                   debit_amount, credit_amount, balance, reference_number, beneficiary_name, upi_id
-            FROM transactions 
-            WHERE description LIKE ? 
-            ORDER BY transaction_date DESC 
+            SELECT t.transaction_id, t.transaction_date, t.description, t.transaction_type,
+                   t.debit_amount, t.credit_amount, t.balance, t.reference_number, t.beneficiary_name, t.upi_id
+            FROM transactions t
+            JOIN transactions_fts fts ON t.transaction_id = fts.rowid
+            WHERE fts.description MATCH ?
+            ORDER BY t.transaction_date DESC
             LIMIT ?
             """,
-            (f"%{pattern}%", limit),
+            (pattern, limit),
             cache_ttl=60  # Cache for 1 minute
         )
         
@@ -191,12 +193,18 @@ def search_transactions(pattern: str, limit: int = 20) -> str:
             "limit_applied": limit,
             "performance": {
                 "execution_time": result.execution_time,
-                "cached": result.cached
+                "cached": result.cached,
+                "search_method": "FTS5"
             }
         }
         
         return serialize_result(response)
     except Exception as e:
+        # Provide a more helpful error if FTS table is missing
+        if "no such table: transactions_fts" in str(e).lower():
+            return serialize_result({
+                "error": "FTS table not found. Please run the consolidation script to build the search index."
+            })
         return serialize_result({"error": f"Error searching transactions: {str(e)}"})
 
 @mcp.tool()
@@ -492,7 +500,7 @@ def find_recurring_payments(min_occurrences: int = 3, days_back: int = 90, top_n
     try:
         # Validate parameters
         min_occurrences = max(2, min(min_occurrences, 10))
-        days_back = max(7, min(days_back, 365))
+        days_back = max(7, min(days_back, 1825))
         top_n = max(1, min(top_n, 100))
         
         start_date = (datetime.now() - timedelta(days=days_back)).strftime('%Y-%m-%d')

@@ -107,12 +107,12 @@ async def test_mcp_server_direct():
             "id": 2,
             "method": "tools/call",
             "params": {
-                "name": "get_account_summary",
-                "arguments": {}
+                "name": "find_recurring_payments",
+                "arguments": {"days_back": 1200}
             }
         }
         
-        print("📤 Sending tool call request (get_account_summary)...")
+        print("📤 Sending tool call request (find_recurring_payments with days_back=1200)...")
         tool_json = json.dumps(tool_request) + "\n"
         process.stdin.write(tool_json)
         process.stdin.flush()

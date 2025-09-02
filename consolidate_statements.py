@@ -117,6 +117,42 @@ class BankStatementConsolidator:
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_transactions_type ON transactions(transaction_type)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_transactions_amount ON transactions(debit_amount, credit_amount)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_transactions_beneficiary ON transactions(beneficiary_name)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_transactions_recurring ON transactions(beneficiary_name, debit_amount, transaction_date)")
+        
+        # Create FTS table for fast text search on transaction descriptions
+        cursor.execute("""
+            CREATE VIRTUAL TABLE IF NOT EXISTS transactions_fts USING fts5(
+                description,
+                content='transactions',
+                content_rowid='transaction_id',
+                tokenize = 'porter unicode61'
+            )
+        """)
+
+        # Triggers to keep the FTS table synchronized with the transactions table
+        cursor.execute("""
+            CREATE TRIGGER IF NOT EXISTS transactions_after_insert
+            AFTER INSERT ON transactions BEGIN
+                INSERT INTO transactions_fts(rowid, description)
+                VALUES (new.transaction_id, new.description);
+            END;
+        """)
+        cursor.execute("""
+            CREATE TRIGGER IF NOT EXISTS transactions_after_delete
+            AFTER DELETE ON transactions BEGIN
+                INSERT INTO transactions_fts(transactions_fts, rowid, description)
+                VALUES ('delete', old.transaction_id, old.description);
+            END;
+        """)
+        cursor.execute("""
+            CREATE TRIGGER IF NOT EXISTS transactions_after_update
+            AFTER UPDATE ON transactions BEGIN
+                INSERT INTO transactions_fts(transactions_fts, rowid, description)
+                VALUES ('delete', old.transaction_id, old.description);
+                INSERT INTO transactions_fts(rowid, description)
+                VALUES (new.transaction_id, new.description);
+            END;
+        """)
         
         self.conn.commit()
         logger.info("Database schema created successfully")
@@ -534,6 +570,14 @@ class BankStatementConsolidator:
             file_path = os.path.join(self.statements_dir, file_name)
             if self.process_statement_file(file_path):
                 successful += 1
+        
+        if successful > 0:
+            logger.info("Rebuilding FTS index for fast search. This may take a moment...")
+            cursor = self.conn.cursor()
+            # Rebuild the FTS index to include all existing and new transactions
+            cursor.execute("INSERT INTO transactions_fts(transactions_fts) VALUES('rebuild');")
+            self.conn.commit()
+            logger.info("FTS index rebuilt successfully.")
                 
         logger.info(f"Successfully processed {successful}/{len(files)} files")
         return successful == len(files)
