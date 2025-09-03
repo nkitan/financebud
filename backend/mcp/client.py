@@ -21,6 +21,7 @@ import logging
 import os
 import subprocess
 import signal
+import sys
 import time
 import weakref
 from typing import Dict, List, Any, Optional, Tuple, Union, Set, Callable
@@ -35,6 +36,11 @@ from concurrent.futures import ThreadPoolExecutor
 from ..logging_config import get_logger_with_context
 
 logger = get_logger_with_context(__name__)
+
+# Global timeout settings
+DEFAULT_REQUEST_TIMEOUT = 120.0
+DEFAULT_HEALTH_CHECK_INTERVAL = 30.0
+DEFAULT_RETRY_DELAY = 2.0
 
 class ConnectionState(Enum):
     """Connection states for MCP servers."""
@@ -54,9 +60,9 @@ class MCPServerConfig:
     env: Dict[str, str] = field(default_factory=dict)
     working_dir: Optional[str] = None
     max_retries: int = 3
-    retry_delay: float = 2.0
-    health_check_interval: float = 30.0
-    request_timeout: float = 300.0
+    retry_delay: float = DEFAULT_RETRY_DELAY
+    health_check_interval: float = DEFAULT_HEALTH_CHECK_INTERVAL
+    request_timeout: float = DEFAULT_REQUEST_TIMEOUT
     auto_reconnect: bool = True
 
 @dataclass
@@ -65,7 +71,7 @@ class ToolCallRequest:
     tool_name: str
     arguments: Dict[str, Any]
     request_id: str
-    timeout: float = 300.0
+    timeout: float = DEFAULT_REQUEST_TIMEOUT
     callback: Optional[Callable] = None
 
 class MCPConnection:
@@ -145,25 +151,23 @@ class MCPConnection:
             "PYTHONDONTWRITEBYTECODE": "1"  # Skip .pyc file creation
         })
         
-        self.process = subprocess.Popen(
-            [self.config.command] + self.config.args,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
+        self.process = await asyncio.create_subprocess_exec(
+            self.config.command,
+            *self.config.args,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
             env=env,
-            cwd=self.config.working_dir,
-            bufsize=1,  # Line buffered for better responsiveness
-            preexec_fn=None if hasattr(signal, 'SIGKILL') else None
+            cwd=self.config.working_dir
         )
         
         # Wait for process to stabilize
         await asyncio.sleep(0.2)
         
         # Check if process is still running
-        if self.process.poll() is not None:
-            stderr_output = self.process.stderr.read() if self.process.stderr else "No error output"
-            raise Exception(f"Process exited immediately. Error: {stderr_output}")
+        if self.process.returncode is not None:
+            stderr_output = await self.process.stderr.read() if self.process.stderr else b""
+            raise Exception(f"Process exited immediately. Error: {stderr_output.decode('utf-8', errors='ignore')}")
     
     async def _initialize_connection(self):
         """Initialize the MCP connection with optimized handshake."""
@@ -187,7 +191,7 @@ class MCPConnection:
         
         # Send initialization with shorter timeout for faster failure detection
         await self._send_request_direct(init_request)
-        response = await self._read_response_direct(timeout=5.0)
+        response = await self._read_response_direct(timeout=DEFAULT_REQUEST_TIMEOUT)
         
         if "error" in response:
             raise Exception(f"Initialization failed: {response['error']}")
@@ -214,7 +218,7 @@ class MCPConnection:
         }
         
         await self._send_request_direct(tools_request)
-        response = await self._read_response_direct(timeout=5.0)
+        response = await self._read_response_direct(timeout=DEFAULT_REQUEST_TIMEOUT)
         
         if "error" in response:
             logger.warning(f"Failed to fetch tools from {self.config.name}: {response['error']}")
@@ -349,7 +353,7 @@ class MCPConnection:
                 # Read a line with timeout (should be longer than typical tool execution time)
                 line = await asyncio.wait_for(
                     self._read_line_async(),
-                    timeout=30.0  # Increased timeout to handle database queries
+                    timeout=DEFAULT_REQUEST_TIMEOUT  # Increased timeout to handle database queries
                 )
                 
                 if not line:
@@ -383,7 +387,7 @@ class MCPConnection:
                 
                 if self.state == ConnectionState.CONNECTED:
                     # Check if process is still alive
-                    if not self.process or self.process.poll() is not None:
+                    if not self.process or self.process.returncode is not None:
                         logger.warning(f"MCP server process for {self.config.name} died, reconnecting...")
                         await self._reconnect()
                 
@@ -425,7 +429,7 @@ class MCPConnection:
             self.last_error = f"Failed to reconnect after {self.config.max_retries} attempts"
             logger.error(f"❌ Failed to reconnect to {self.config.name}")
     
-    async def call_tool(self, tool_name: str, arguments: Dict[str, Any], timeout: float = 30.0) -> Any:
+    async def call_tool(self, tool_name: str, arguments: Dict[str, Any], timeout: float = DEFAULT_REQUEST_TIMEOUT) -> Any:
         """Call a tool asynchronously with optimized handling."""
         if self.state != ConnectionState.CONNECTED:
             if self.config.auto_reconnect and self.state != ConnectionState.RECONNECTING:
@@ -471,12 +475,12 @@ class MCPConnection:
         request_json = json.dumps(request) + "\n"
         
         try:
-            self.process.stdin.write(request_json)
-            self.process.stdin.flush()
+            self.process.stdin.write(request_json.encode('utf-8'))
+            await self.process.stdin.drain()
         except (BrokenPipeError, OSError) as e:
             raise Exception(f"Failed to send request: {e}")
     
-    async def _read_response_direct(self, timeout: float = 30.0) -> Dict[str, Any]:
+    async def _read_response_direct(self, timeout: float = 60.0) -> Dict[str, Any]:
         """Read a response directly (for initialization and health checks)."""
         if not self.process or not self.process.stdout:
             raise Exception("Process not available for reading response")
@@ -502,8 +506,8 @@ class MCPConnection:
         if not self.process or not self.process.stdout:
             raise Exception("Process stdout not available")
         
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(None, self.process.stdout.readline)
+        line = await self.process.stdout.readline()
+        return line.decode('utf-8')
     
     def _get_next_id(self) -> int:
         """Get the next request ID."""
@@ -551,7 +555,7 @@ class MCPConnection:
         # Terminate process
         if self.process:
             try:
-                if self.process.poll() is None:
+                if self.process.returncode is None:
                     self.process.terminate()
                     
                     try:
@@ -571,8 +575,7 @@ class MCPConnection:
     async def _wait_for_process(self):
         """Wait for the process to terminate."""
         if self.process:
-            while self.process.poll() is None:
-                await asyncio.sleep(0.1)
+            await self.process.wait()
     
     async def stop(self):
         """Stop the persistent connection."""
@@ -606,7 +609,7 @@ class MCPConnection:
             "connection_attempts": self.connection_attempts,
             "tools_count": len(self.tools),
             "tools": list(self.tools.keys()),
-            "process_running": self.process is not None and self.process.poll() is None,
+            "process_running": self.process is not None and self.process.returncode is None,
             "uptime_seconds": uptime,
             "stats": self.stats.copy(),
             "pending_requests": self.request_queue.qsize(),
@@ -648,7 +651,7 @@ class MCPManager:
                 del self.connections[name]
                 logger.info(f"Removed server: {name}")
     
-    async def call_tool(self, server_name: str, tool_name: str, arguments: Dict[str, Any], timeout: float = 300.0) -> Any:
+    async def call_tool(self, server_name: str, tool_name: str, arguments: Dict[str, Any], timeout: float = DEFAULT_REQUEST_TIMEOUT) -> Any:
         """Call a tool on a specific server."""
         if server_name not in self.connections:
             raise Exception(f"Server {server_name} not found")
@@ -661,8 +664,8 @@ class MCPManager:
         if self.initialized:
             return
 
-        app_home = os.environ.get("APP_HOME", "/app")
-        python_executable = "/usr/local/bin/python"
+        app_home = os.getcwd()
+        python_executable = sys.executable
         mcp_server_script = os.path.join(app_home, "mcp_server.py")
 
         # Financial data server configuration
@@ -674,7 +677,7 @@ class MCPManager:
             max_retries=3,
             retry_delay=1.0,
             health_check_interval=60.0,  # Check every minute
-            request_timeout=15.0,  # Faster timeout for financial queries
+            request_timeout=60.0,  # Faster timeout for financial queries
             auto_reconnect=True
         )
 
